@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Fast Notes
+GenericName=Quick notes
+GenericName[pt_BR]=Notas rápidas
+Comment=Jot anything down in an instant
+Comment[pt_BR]=Anote qualquer coisa num instante
+Exec=fastnotes
+Icon=io.github.tevoetals.fastnotes
+Terminal=false
+Categories=Utility;TextEditor;
+Keywords=notes;markdown;quick;
+Keywords[pt_BR]=notas;anotações;rápido;markdown;
+StartupNotify=true

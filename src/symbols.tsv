@@ -1,0 +1,349 @@
+→	0	seta direita	arrow right | direita
+←	0	seta esquerda	arrow left
+↑	0	seta cima	arrow up
+↓	0	seta baixo	arrow down
+↔	0	seta dupla horizontal	left right arrow
+↕	0	seta dupla vertical	
+⇒	0	implica	double arrow right | implies
+⇐	0	seta dupla esquerda	
+⇔	0	se e somente se	iff | double arrow
+↗	0	seta nordeste	up right
+↘	0	seta sudeste	down right
+↙	0	seta sudoeste	
+↖	0	seta noroeste	
+↩	0	retorno	return | voltar
+↪	0	avançar	forward
+⤴	0	curva para cima	
+⤵	0	curva para baixo	
+↻	0	girar horário	refresh | recarregar | rotate
+↺	0	girar anti-horário	undo
+➜	0	seta gorda direita	
+➔	0	seta gorda	
+➤	0	ponta de seta	pointer
+▶	0	play	reproduzir | triângulo direita
+◀	0	triângulo esquerda	voltar
+⏵	0	play pequeno	
+⏸	0	pausa	pause
+⏹	0	parar	stop
+⏩	0	avanço rápido	fast forward
+⏪	0	retrocesso	
+⏭	0	próxima faixa	next
+⏮	0	faixa anterior	previous
+⏏	0	ejetar	eject
+✓	1	marca de certo	check | ok | feito | tick
+✔	1	marca de certo grossa	check bold
+✗	1	xis	x | errado | cross
+✘	1	xis grosso	cross bold
+☑	1	caixa marcada	checkbox checked
+☐	1	caixa vazia	checkbox
+☒	1	caixa com xis	
+•	1	marcador	bullet | ponto
+◦	1	marcador branco	bullet white
+‣	1	marcador triangular	
+⁃	1	hífen marcador	
+∙	1	ponto operador	
+·	1	ponto do meio	middle dot
+…	1	reticências	ellipsis
+†	1	adaga	dagger | cruz
+‡	1	adaga dupla	
+※	1	referência	reference mark
+¶	1	parágrafo	pilcrow | paragraph
+§	1	seção	section
+©	1	copyright	direitos autorais
+®	1	marca registrada	registered
+™	1	trademark	marca
+℠	1	service mark	
+°	1	grau	degree | graus
+‰	1	por mil	per mille
+№	1	número	numero sign
+℃	1	celsius	graus celsius
+℉	1	fahrenheit	
+■	2	quadrado preto	square
+□	2	quadrado branco	square white
+▪	2	quadrado pequeno preto	
+▫	2	quadrado pequeno branco	
+▬	2	retângulo	
+▭	2	retângulo branco	
+●	2	círculo preto	circle | bola
+○	2	círculo branco	circle white
+◉	2	alvo	círculo com ponto
+◎	2	círculo duplo	
+◆	2	losango preto	diamond
+◇	2	losango branco	diamond white
+◈	2	losango com centro	
+▲	2	triângulo cima	triangle up
+▼	2	triângulo baixo	triangle down
+△	2	triângulo branco cima	
+▽	2	triângulo branco baixo	
+◢	2	triângulo canto	
+◣	2	triângulo canto esquerdo	
+★	2	estrela preta	star | estrela
+☆	2	estrela branca	star white
+✦	2	estrela quatro pontas	
+✧	2	estrela quatro pontas branca	
+✪	2	estrela circulada	
+✯	2	estrela pentagrama	
+❖	2	losango decorativo	
+⬤	2	círculo grande	
+⬛	2	quadrado grande preto	
+⬜	2	quadrado grande branco	
+◐	2	meio círculo esquerdo	
+◑	2	meio círculo direito	
+◒	2	meio círculo baixo	
+◓	2	meio círculo cima	
+▁	2	bloco baixo 1/8	
+▂	2	bloco 2/8	
+▃	2	bloco 3/8	
+▄	2	meio bloco baixo	
+▅	2	bloco 5/8	
+▆	2	bloco 6/8	
+▇	2	bloco 7/8	
+█	2	bloco cheio	full block
+░	2	sombra clara	shade light
+▒	2	sombra média	
+▓	2	sombra escura	
+±	3	mais ou menos	plus minus
+×	3	multiplicação	vezes | times
+÷	3	divisão	division
+−	3	menos	minus
+≠	3	diferente	not equal
+≈	3	aproximadamente	approx
+≡	3	idêntico	equivalent
+≤	3	menor ou igual	less equal
+≥	3	maior ou igual	greater equal
+≪	3	muito menor	
+≫	3	muito maior	
+∞	3	infinito	infinity
+√	3	raiz quadrada	sqrt | root
+∛	3	raiz cúbica	
+∑	3	somatório	sum | sigma
+∏	3	produtório	product
+∫	3	integral	
+∂	3	derivada parcial	partial
+∆	3	delta	variação
+∇	3	nabla	gradiente
+∈	3	pertence	element of
+∉	3	não pertence	
+⊂	3	subconjunto	subset
+⊃	3	superconjunto	
+∪	3	união	union
+∩	3	interseção	intersection
+∅	3	conjunto vazio	empty set
+∀	3	para todo	for all
+∃	3	existe	exists
+¬	3	negação	not
+∧	3	e lógico	and
+∨	3	ou lógico	or
+⊕	3	ou exclusivo	xor
+∴	3	portanto	therefore
+∵	3	porque	because
+∝	3	proporcional	
+∠	3	ângulo	angle
+⊥	3	perpendicular	
+∥	3	paralelo	
+π	3	pi	
+θ	3	teta	theta
+λ	3	lambda	
+μ	3	mi	mu | micro
+σ	3	sigma minúsculo	desvio padrão
+Ω	3	ômega	ohm
+α	3	alfa	alpha
+β	3	beta	
+γ	3	gama	gamma
+δ	3	delta minúsculo	
+ε	3	épsilon	epsilon
+φ	3	fi	phi
+ω	3	ômega minúsculo	
+½	3	meio	half | 1/2
+⅓	3	um terço	1/3
+¼	3	um quarto	1/4
+¾	3	três quartos	3/4
+⅛	3	um oitavo	
+²	3	ao quadrado	squared | expoente 2
+³	3	ao cubo	cubed
+¹	3	expoente 1	
+⁰	3	expoente 0	
+ⁿ	3	expoente n	
+₀	3	índice 0	subscrito
+₁	3	índice 1	
+₂	3	índice 2	
+‰	3	por mil	
+%	3	porcento	percent
+‱	3	por dez mil	
+ℓ	3	litro	script l
+ℝ	3	reais	real numbers
+ℕ	3	naturais	
+ℤ	3	inteiros	
+ℚ	3	racionais	
+ℂ	3	complexos	
+R$	4	real	reais | brl
+$	4	dólar	dollar
+€	4	euro	
+£	4	libra	pound
+¥	4	iene	yen | yuan
+₿	4	bitcoin	btc
+₹	4	rúpia	rupee
+₩	4	won	
+₽	4	rublo	ruble
+¢	4	centavo	cent
+₺	4	lira turca	
+₪	4	shekel	
+₫	4	dong	
+₱	4	peso filipino	
+¤	4	moeda genérica	currency
+–	5	travessão curto	en dash | meia-risca
+—	5	travessão	em dash
+―	5	barra horizontal	
+“	5	aspas abre	quote open
+”	5	aspas fecha	quote close
+‘	5	aspa simples abre	
+’	5	aspa simples fecha	apóstrofo
+«	5	aspas angulares abre	guillemet
+»	5	aspas angulares fecha	
+‹	5	aspa angular simples abre	
+›	5	aspa angular simples fecha	
+¿	5	interrogação invertida	
+¡	5	exclamação invertida	
+‽	5	interrobang	
+⁂	5	asterismo	
+~	5	til	tilde
+^	5	circunflexo	caret
+|	5	barra vertical	pipe
+¦	5	barra vertical quebrada	
+\	5	barra invertida	backslash
+_	5	sublinhado	underscore
+‐	5	hífen	
+‑	5	hífen não separável	
+​	5	espaço zero	zero width space
+ 	5	espaço não separável	nbsp | non-breaking space
+─	6	linha horizontal	box horizontal
+│	6	linha vertical	box vertical
+┌	6	canto superior esquerdo	
+┐	6	canto superior direito	
+└	6	canto inferior esquerdo	
+┘	6	canto inferior direito	
+├	6	junção esquerda	
+┤	6	junção direita	
+┬	6	junção cima	
+┴	6	junção baixo	
+┼	6	cruz	
+═	6	linha dupla horizontal	
+║	6	linha dupla vertical	
+╔	6	canto duplo superior esquerdo	
+╗	6	canto duplo superior direito	
+╚	6	canto duplo inferior esquerdo	
+╝	6	canto duplo inferior direito	
+╠	6	junção dupla esquerda	
+╣	6	junção dupla direita	
+╬	6	cruz dupla	
+╭	6	canto arredondado superior esquerdo	
+╮	6	canto arredondado superior direito	
+╰	6	canto arredondado inferior esquerdo	
+╯	6	canto arredondado inferior direito	
+☀	7	sol	sun
+☁	7	nuvem	cloud
+☂	7	guarda-chuva	umbrella
+☃	7	boneco de neve	snowman
+☄	7	cometa	
+☾	7	lua crescente	moon
+☽	7	lua	
+⚡	7	raio	lightning
+❄	7	floco de neve	snowflake
+♠	7	espadas	spade
+♣	7	paus	club
+♥	7	copas	heart | coração
+♦	7	ouros	diamond
+♤	7	espadas branco	
+♧	7	paus branco	
+♡	7	coração branco	heart white
+♢	7	ouros branco	
+♔	7	rei branco	chess king
+♕	7	rainha branca	
+♖	7	torre branca	
+♗	7	bispo branco	
+♘	7	cavalo branco	
+♙	7	peão branco	
+♚	7	rei preto	
+♛	7	rainha preta	
+♜	7	torre preta	
+♝	7	bispo preto	
+♞	7	cavalo preto	
+♟	7	peão preto	
+♩	7	semínima	music note
+♪	7	colcheia	nota musical | music
+♫	7	colcheias	notas musicais
+♬	7	semicolcheias	
+♭	7	bemol	flat
+♮	7	bequadro	natural
+♯	7	sustenido	sharp
+☎	7	telefone	phone
+✉	7	envelope	email | carta
+✂	7	tesoura	scissors | cortar
+✎	7	lápis	pencil
+✏	7	lápis 2	
+✍	7	mão escrevendo	
+☜	7	mão esquerda	hand left
+☞	7	mão direita	hand right | pointing
+☝	7	mão cima	
+☟	7	mão baixo	
+☠	7	caveira	skull
+☢	7	radioativo	
+☣	7	risco biológico	
+☮	7	paz	peace
+☯	7	yin yang	
+☸	7	roda do dharma	
+✝	7	cruz latina	
+✡	7	estrela de davi	
+☪	7	estrela e crescente	
+⚛	7	átomo	atom
+⚙	7	engrenagem	gear | configurações
+⚠	7	aviso	warning | atenção
+⚑	7	bandeira preta	flag
+⚐	7	bandeira branca	
+⚓	7	âncora	anchor
+⚔	7	espadas cruzadas	
+⚖	7	balança	scale | justiça
+⚗	7	alambique	
+⚘	7	flor	
+⚚	7	caduceu	
+⚜	7	flor de lis	
+⚧	7	transgênero	
+♀	7	feminino	female | vênus
+♂	7	masculino	male | marte
+⚥	7	masculino e feminino	
+✈	7	avião	airplane
+⌘	7	command	cmd | mac
+⌥	7	option	alt mac
+⇧	7	shift	
+⌃	7	control mac	
+⌫	7	backspace	apagar
+⌦	7	delete	
+⏎	7	enter	return
+⇥	7	tab	
+⎋	7	escape	esc
+␣	7	espaço	space
+⌂	7	casa	home
+⌚	7	relógio	watch
+⌛	7	ampulheta	hourglass
+⏰	7	despertador	
+⏱	7	cronômetro	
+⏳	7	ampulheta correndo	
+☕	7	café	coffee
+✿	7	flor preta	
+❀	7	flor branca	
+❁	7	flor	
+✾	7	flor seis pétalas	
+❤	7	coração vermelho	
+❣	7	coração exclamação	
+❥	7	coração rotacionado	
+✌	7	vitória	paz mão
+✊	7	punho	
+☺	7	carinha feliz	smiley
+☻	7	carinha preta	
+☹	7	carinha triste	
+♨	7	fontes termais	
+♻	7	reciclagem	recycle
+♿	7	acessível	cadeira de rodas
+⚕	7	medicina	bastão de asclépio
+〒	7	correio japonês	
+〽	7	marca de parte	

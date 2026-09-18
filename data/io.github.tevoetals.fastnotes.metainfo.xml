@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tevoetals.fastnotes</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Fast Notes</name>
+  <summary>Instant Markdown notes</summary>
+  <summary xml:lang="pt-BR">Notas instantâneas em Markdown</summary>
+  <developer id="io.github.tevoetals">
+    <name>Tevo Etals</name>
+  </developer>
+  <description>
+    <p>Fast Notes opens in a blink and shows live, Notion-like Markdown as you type: headings, lists, checkboxes, toggles, columns, tables, inline images and an emoji and symbol picker.</p>
+    <p>It is written in pure Rust and talks to Wayland directly, with software rendering and a strict black-and-white theme. Notes are plain Markdown files that open in any other editor.</p>
+    <p xml:lang="pt-BR">O Fast Notes abre num piscar de olhos e mostra Markdown ao vivo, no estilo Notion, enquanto você digita: títulos, listas, caixas de seleção, toggles, colunas, tabelas, imagens no meio do texto e um seletor de emoji e símbolos.</p>
+    <p xml:lang="pt-BR">É escrito em Rust puro e fala diretamente com o Wayland, com renderização por software e um tema estritamente preto e branco. As notas são arquivos Markdown comuns, que abrem em qualquer outro editor.</p>
+  </description>
+  <launchable type="desktop-id">io.github.tevoetals.fastnotes.desktop</launchable>
+  <url type="homepage">https://github.com/tevoetals/fastnotes</url>
+  <url type="bugtracker">https://github.com/tevoetals/fastnotes/issues</url>
+  <url type="vcs-browser">https://github.com/tevoetals/fastnotes</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#ffffff</color>
+    <color type="primary" scheme_preference="dark">#000000</color>
+  </branding>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/tevoetals/fastnotes/main/data/screenshots/editor.png</image>
+      <caption>Live Markdown with a table, a toggle and an inline image</caption>
+      <caption xml:lang="pt-BR">Markdown ao vivo com tabela, toggle e imagem no texto</caption>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">480</display_length>
+  </requires>
+  <keywords>
+    <keyword>notes</keyword>
+    <keyword>markdown</keyword>
+    <keyword xml:lang="pt-BR">notas</keyword>
+    <keyword xml:lang="pt-BR">anotações</keyword>
+  </keywords>
+  <releases>
+    <release version="0.2.0" date="2026-09-18">
+      <description>
+        <p>First public release: live Markdown, tabs, tables, toggles, columns, inline images with mouse resizing, short line breaks, emoji and symbol pickers.</p>
+        <p xml:lang="pt-BR">Primeira versão pública: Markdown ao vivo, abas, tabelas, toggles, colunas, imagens no texto com redimensionamento pelo mouse, quebra curta, seletores de emoji e símbolos.</p>
+      </description>
+    </release>
+  </releases>
+</component>
