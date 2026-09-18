@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Publica uma versão: Cargo.toml + metainfo + tag no GitHub + manifesto no Flathub.
+# Publica uma versão: Cargo.toml + metainfo + tag no GitHub + repositório Flatpak
+# em https://tevoetals.github.io/fastnotes (+ manifesto no Flathub, se houver clone).
 #   ./release.sh 0.3.0 "O que mudou nesta versão"
-# Depois do push, o Flathub compila e publica sozinho (aparece no Discover em ~1 h).
+# Quem instalou pelo Discover recebe a atualização na próxima verificação.
 set -euo pipefail
 cd "$(dirname "$0")"
 ID=io.github.tevoetals.fastnotes
@@ -42,13 +43,26 @@ git push -q origin HEAD "v$VER"
 COMMIT=$(git rev-parse HEAD)
 sed -i "s/^        tag: .*/        tag: v$VER/; s/^        commit: .*/        commit: $COMMIT/" "flatpak/$ID.yml"
 git commit -q -am "flatpak: aponta para v$VER" && git push -q origin HEAD
-# 4. Flathub
+# 4. Repositório Flatpak próprio (GitHub Pages): o Discover instala e atualiza por ele.
+#    Compila a partir da tag no GitHub, exatamente como o Flathub faria.
+GPG=${FLATPAK_GPG_KEY:-DF1D9A48AE1AF10B2CC3B8FB525FB892E8422588}
+gpg --list-secret-keys "$GPG" >/dev/null 2>&1 || GPG=""
+flatpak run org.flatpak.Builder --user --force-clean --ccache --repo=flatpak/repo --default-branch=stable \
+  ${GPG:+--gpg-sign=$GPG} flatpak/build "flatpak/$ID.yml" > /dev/null
+flatpak build-update-repo --prune ${GPG:+--gpg-sign=$GPG} flatpak/repo > /dev/null
+rm -rf flatpak/build .flatpak-builder/build
+W=$(mktemp -d)
+cp -r flatpak/site/. "$W/"
+cp -r flatpak/repo "$W/repo"; rm -rf "$W/repo/tmp" "$W/repo/.lock"
+git -C "$W" init -q -b gh-pages && git -C "$W" add -A && git -C "$W" commit -q -m "site: v$VER"
+git -C "$W" push -q -f git@github.com:tevoetals/fastnotes.git gh-pages
+rm -rf "$W"
+echo "✔ v$VER publicada em https://tevoetals.github.io/fastnotes (Discover atualiza em ~1 h)"
+# 5. Flathub (só depois de o app ser aceito lá; o clone aponta para flathub/$ID)
 if [[ -d $FLATHUB/.git ]]; then
   cp "flatpak/$ID.yml" flatpak/cargo-sources.json "$FLATHUB/"
   git -C "$FLATHUB" add -A
   git -C "$FLATHUB" commit -q -m "Update to v$VER" || true
   git -C "$FLATHUB" push -q
-  echo "✔ v$VER publicada no GitHub e enviada ao Flathub ($FLATHUB)"
-else
-  echo "✔ v$VER publicada no GitHub; clone do Flathub não encontrado em $FLATHUB"
+  echo "✔ manifesto enviado ao Flathub ($FLATHUB)"
 fi

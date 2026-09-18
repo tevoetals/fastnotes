@@ -25,10 +25,13 @@ vivo como no Notion.
 
 ## Instalar
 
-Pela loja (Discover, GNOME Software ou qualquer loja com Flathub):
+Pela loja (Discover, GNOME Software ou qualquer loja com Flatpak): abra
+<https://tevoetals.github.io/fastnotes> e clique em **Instalar**. O arquivo
+`.flatpakref` adiciona o repositório do Fast Notes e o app passa a receber
+atualizações junto com as demais. Pelo terminal:
 
 ```sh
-flatpak install flathub io.github.tevoetals.fastnotes
+flatpak install https://tevoetals.github.io/fastnotes/fastnotes.flatpakref
 ```
 
 A partir do código, otimizado para a sua CPU:
@@ -297,22 +300,27 @@ que a interface tenha um ritmo único. As regras e de onde vêm:
 Margens: 32 px nas laterais do texto, 24 px acima; cabeçalho 48 px e rodapé
 32 px; painel de notas 384 px de largura com busca de 40 px.
 
-## Publicar uma versão (Flathub)
+## Publicar uma versão (Flatpak)
 
-O pacote da loja é o Flatpak `io.github.tevoetals.fastnotes`: manifesto e
-fontes offline do cargo em `flatpak/`, metadados em `data/` (desktop,
-AppStream, ícone, captura). O Flathub compila a partir da tag no GitHub, sem
-rede, por isso `flatpak/cargo-sources.json` precisa acompanhar o `Cargo.lock`.
+O pacote da loja é o Flatpak `io.github.tevoetals.fastnotes`, servido pelo
+repositório assinado em <https://tevoetals.github.io/fastnotes/repo> (branch
+`gh-pages` deste repositório). Manifesto, fontes offline do cargo e o site
+ficam em `flatpak/`; metadados em `data/` (desktop, AppStream, ícone,
+captura). O build lê o código pela tag no GitHub e sem rede, por isso
+`flatpak/cargo-sources.json` precisa acompanhar o `Cargo.lock`.
 
 ```sh
-./release.sh 0.3.0 "O que mudou"   # versão, changelog, tag, push e Flathub
+./release.sh 0.3.0 "O que mudou"   # versão, changelog, tag, build e publicação
 ```
 
 O script atualiza `Cargo.toml` e o `metainfo.xml`, regenera as fontes do
-cargo, faz commit e tag `vX.Y.Z`, envia ao GitHub e copia o manifesto para o
-clone do Flathub (`~/Programs/flathub-io.github.tevoetals.fastnotes`). O
-Flathub compila e publica sozinho; a atualização aparece no Discover em cerca
-de uma hora. Para testar o Flatpak localmente:
+cargo, faz commit e tag `vX.Y.Z`, envia ao GitHub, compila o Flatpak com
+`org.flatpak.Builder`, assina os commits do ostree (chave `Fast Notes
+Flatpak` no GPG local) e publica o repositório no GitHub Pages. Quem instalou
+pelo Discover recebe a versão nova na próxima verificação de atualizações.
+Se houver um clone do repositório do app no Flathub em
+`~/Programs/flathub-io.github.tevoetals.fastnotes`, o manifesto também é
+enviado para lá. Para testar o Flatpak localmente:
 
 ```sh
 flatpak run org.flatpak.Builder --user --install --force-clean flatpak/build flatpak/io.github.tevoetals.fastnotes.yml
