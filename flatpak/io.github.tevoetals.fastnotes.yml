@@ -1,16 +1,21 @@
 id: io.github.tevoetals.fastnotes
 runtime: org.freedesktop.Platform
-runtime-version: '25.08'
+runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: fastnotes
 finish-args:
-  # Fala Wayland diretamente; não há fallback X11.
+  # Fala Wayland diretamente (X11 só como fallback nominal; o app não o usa).
   - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
   # Imagens arrastadas do gerenciador de arquivos chegam como file:// e são
-  # copiadas para a pasta da nota; só leitura da pasta pessoal.
-  - --filesystem=home:ro
+  # copiadas para a pasta da nota; leitura das pastas usuais de imagens.
+  - --filesystem=xdg-pictures:ro
+  - --filesystem=xdg-download:ro
+  - --filesystem=xdg-documents:ro
+  - --filesystem=xdg-desktop:ro
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
