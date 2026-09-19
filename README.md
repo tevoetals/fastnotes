@@ -125,9 +125,24 @@ conteúdo da coluna 2
 ```
 
 As colunas são desenhadas lado a lado com largura igual; a altura do bloco é a
-da coluna mais alta. Você clica, arrasta e edita dentro de cada coluna; `↑`/`↓`
-percorrem as linhas de uma coluna e passam para a seguinte. As linhas `:::` e
-`|||` ficam invisíveis. Tabelas dentro de colunas aparecem sem a grade.
+da coluna mais alta. Você clica, arrasta e edita dentro de cada coluna. As
+linhas `:::` e `|||` ficam invisíveis e o cursor nunca para nelas: as setas
+andam em grade, como no Notion e nos editores ProseMirror (o "gap cursor"
+pula posições sem texto).
+
+- `→` no fim de uma coluna vai ao início da seguinte; `←` no início volta ao
+  fim da anterior; na última/primeira coluna saem do bloco.
+- `↑` na primeira linha de qualquer coluna vai à linha acima do bloco; `↓` na
+  última linha vai à linha abaixo. Chegando de cima ou de baixo, o cursor
+  entra na primeira coluna.
+- `Backspace` no início de uma célula e `Delete` no fim não fundem nada com
+  `|||`/`:::`: só movem o cursor. Um bloco com todas as colunas vazias some
+  inteiro com `Backspace`. `Ctrl+Shift+K` na única linha de uma coluna só a
+  esvazia; `Alt+↑/↓` não cruzam as linhas estruturais.
+- Uma coluna que ficou sem nenhuma linha (por edição externa, por exemplo)
+  ganha uma linha vazia assim que o cursor entra nela.
+
+Tabelas dentro de colunas aparecem sem a grade.
 
 ### Imagens
 

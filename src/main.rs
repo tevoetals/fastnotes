@@ -862,6 +862,8 @@ fn cell_index(pipes: &[usize], idx: usize, ncells: usize) -> usize {
 /// Bloco de colunas renderizado no espaço da linha `:::` inicial.
 struct ColBlock {
     start: usize,
+    /// Última linha do bloco (o `:::` de fecho, ou a última linha se não houver).
+    end: usize,
     height: f32,
     cols: Vec<ColText>,
 }
@@ -893,6 +895,27 @@ impl Tab {
             }
         }
         None
+    }
+
+    /// Bloco de colunas que contém a linha (de conteúdo ou estrutural).
+    fn col_block_of(&self, line: usize) -> Option<usize> {
+        self.columns.iter().position(|b| line >= b.start && line <= b.end)
+    }
+
+    /// Linha estrutural (`:::` de abertura ou o `|||` que antecede a coluna `ci`).
+    fn col_sep_line(&self, bi: usize, ci: usize) -> Option<usize> {
+        let b = self.columns.get(bi)?;
+        if ci == 0 {
+            return Some(b.start);
+        }
+        (b.start + 1..=b.end).filter(|&k| self.lines[k].block == Block::ColSep).nth(ci - 1)
+    }
+
+    /// Bloco de colunas só com linhas vazias (uma por coluna, no máximo).
+    fn col_block_empty(&self, bi: usize) -> bool {
+        let Some(b) = self.columns.get(bi) else { return false };
+        (b.start + 1..b.end).all(|k| matches!(self.lines[k].block, Block::ColSep) || self.line_text(k).trim().is_empty())
+            && b.cols.iter().all(|c| c.map.len() <= 1)
     }
 
     fn new(font_system: &mut FontSystem, font_px: f32) -> Tab {
@@ -1117,15 +1140,18 @@ impl Tab {
             while j < n && !matches!(self.lines[j].block, Block::ColEnd | Block::ColStart) {
                 j += 1;
             }
-            let ncols = (i + 1..j).filter_map(|k| self.lines[k].col.map(|c| c.1)).max().map(|c| c as usize + 1).unwrap_or(1);
+            let end = if j < n && self.lines[j].block == Block::ColEnd { j } else { j.saturating_sub(1).max(start) };
+            let seps = (i + 1..j).filter(|&k| self.lines[k].block == Block::ColSep).count();
+            let ncols = (seps + 1).min(md::MAX_COLS as usize);
             let colw = ((text_w - gap * (ncols as f32 - 1.0)) / ncols as f32).max(40.0);
             let mut cols = Vec::new();
             let mut max_h: f32 = 0.0;
             for c in 0..ncols {
                 let members: Vec<usize> = (i + 1..j).filter(|&k| self.lines[k].col == Some((start, c as u8)) && !self.lines[k].folded).collect();
+                // Coluna sem linhas: intervalo vazio, nenhuma linha "pertence" a ela.
                 let (first, last) = match (members.first(), members.last()) {
                     (Some(&f), Some(&l)) => (f, l),
-                    _ => (j, j),
+                    _ => (usize::MAX, usize::MAX),
                 };
                 let mut pieces: Vec<(String, Attrs<'static>)> = Vec::new();
                 let default = Attrs::new().family(Family::SansSerif).color(WHITE);
@@ -1170,7 +1196,7 @@ impl Tab {
                 max_h = max_h.max(h);
                 cols.push(ColText { first, last, map: members, x: c as f32 * (colw + gap), w: colw, buffer });
             }
-            self.columns.push(ColBlock { start, height: max_h + pad * 2.0, cols });
+            self.columns.push(ColBlock { start, end, height: max_h + pad * 2.0, cols });
             i = j + 1;
         }
     }
@@ -3146,6 +3172,7 @@ impl App {
             return;
         }
         self.ensure_fonts(text);
+        self.leave_structural();
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let boundary = text.chars().last().is_some_and(char::is_whitespace) || text.chars().count() > 1;
         let (_, tab) = self.ui.ed();
@@ -3185,37 +3212,105 @@ impl App {
                 _ => {}
             }
         }
-        // Linhas dobradas ou estruturais (`:::`, `|||`) não param o cursor.
-        if matches!(m, Motion::Up | Motion::Down) {
-            let mut dir = m;
-            for _ in 0..2 {
-                for _ in 0..256 {
-                    let c = tab.editor.cursor();
-                    if !tab.lines.get(c.line).is_some_and(|l| l.skip_cursor()) {
-                        break;
-                    }
-                    tab.editor.action(fs, Action::Motion(dir));
-                    if tab.editor.cursor() == c {
-                        break;
-                    }
-                }
-                let c = tab.editor.cursor();
-                if !tab.lines.get(c.line).is_some_and(|l| l.skip_cursor()) {
-                    break;
-                }
-                // Encostou na borda numa linha estrutural: volta na direção oposta.
-                dir = if dir == Motion::Down { Motion::Up } else { Motion::Down };
-            }
-            let c = tab.editor.cursor();
-            if tab.lines.get(c.line).is_some_and(|l| l.skip_cursor()) {
-                tab.editor.set_cursor(before);
-            }
-        }
+        let horizontal = !matches!(m, Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown | Motion::Vertical(_));
+        let forward = match m {
+            Motion::BufferStart => true,
+            Motion::BufferEnd => false,
+            _ => tab.editor.cursor() > before,
+        };
+        self.settle_cursor(before, forward, horizontal);
         if shift {
             self.update_primary();
         }
         self.wake_cursor();
         self.request_redraw();
+    }
+
+    /// Depois de mover o cursor: se ele parou numa linha estrutural (`:::`,
+    /// `|||`, separador de tabela) ou dobrada, leva-o à linha editável vizinha.
+    /// Num bloco de colunas as setas andam em grade: → no fim de uma coluna vai
+    /// à próxima, ← no início volta à anterior, ↑/↓ saem do bloco por cima ou
+    /// por baixo; vindo de fora, ↓/→ entram na primeira coluna. `before` é a
+    /// posição anterior ao movimento (restaurada se não houver para onde ir).
+    fn settle_cursor(&mut self, before: Cursor, forward: bool, horizontal: bool) {
+        for _ in 0..64 {
+            let tab = self.ui.tab();
+            let c = tab.editor.cursor();
+            if !tab.lines.get(c.line).is_some_and(|l| l.skip_cursor()) {
+                return;
+            }
+            let n = tab.lines.len();
+            let after = |l: usize| (l + 1 < n).then(|| Cursor::new(l + 1, 0));
+            let above = |l: usize| (l > 0).then(|| Cursor::new(l - 1, tab.line_text(l - 1).len()));
+            let mut heal: Option<(usize, usize)> = None;
+            let target = match tab.col_block_of(c.line) {
+                Some(bi) => {
+                    let b = &tab.columns[bi];
+                    let entry = |ci: usize, at_start: bool| -> Option<Cursor> {
+                        let col = &b.cols[ci];
+                        if col.map.is_empty() {
+                            return None;
+                        }
+                        Some(if at_start { Cursor::new(col.first, 0) } else { Cursor::new(col.last, tab.line_text(col.last).len()) })
+                    };
+                    let from = tab.column_of(before.line).filter(|&(fb, _)| fb == bi).map(|(_, ci)| ci);
+                    let last = b.cols.len() - 1;
+                    let (ci, at_start, exit) = match (from, forward, horizontal) {
+                        (Some(ci), true, true) if ci < last => (ci + 1, true, None),
+                        (Some(ci), false, true) if ci > 0 => (ci - 1, false, None),
+                        (Some(_), true, _) => (0, true, Some(after(b.end))),
+                        (Some(_), false, _) => (0, true, Some(above(b.start))),
+                        (None, true, _) => (0, true, None),
+                        (None, false, true) => (last, false, None),
+                        (None, false, false) => (0, false, None),
+                    };
+                    match exit {
+                        Some(t) => t,
+                        None => match entry(ci, at_start) {
+                            Some(t) => Some(t),
+                            None => {
+                                heal = Some((bi, ci));
+                                None
+                            }
+                        },
+                    }
+                }
+                None => if forward { after(c.line) } else { above(c.line) },
+            };
+            if let Some((bi, ci)) = heal {
+                // Coluna sem nenhuma linha: cria uma vazia logo após o separador.
+                if let Some(sep) = tab.col_sep_line(bi, ci) {
+                    let len = tab.line_text(sep).len();
+                    let (_, tab) = self.ui.ed();
+                    tab.editor.set_selection(Selection::None);
+                    tab.editor.start_change();
+                    tab.editor.insert_at(Cursor::new(sep, len), "\n", None);
+                    let change = tab.editor.finish_change();
+                    tab.editor.set_cursor(Cursor::new(sep + 1, 0));
+                    self.after_change(change, true);
+                    return;
+                }
+            }
+            let target = target.or_else(|| if forward { above(c.line) } else { after(c.line) });
+            let (_, tab) = self.ui.ed();
+            match target {
+                Some(t) if t != c => tab.editor.set_cursor(t),
+                _ => {
+                    tab.editor.set_cursor(before);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Antes de editar: um cursor parado numa linha estrutural vai para a
+    /// próxima linha editável, para nunca corromper `:::`, `|||` ou `|---|`.
+    fn leave_structural(&mut self) {
+        let tab = self.ui.tab();
+        let c = tab.editor.cursor();
+        if tab.lines.get(c.line).is_some_and(|l| l.skip_cursor()) {
+            self.settle_cursor(c, true, false);
+        }
     }
 
     fn delete_word(&mut self, backward: bool) {
@@ -3296,6 +3391,36 @@ impl App {
         self.ui.tab().lines.get(i).is_some_and(|l| l.block == Block::Space)
     }
 
+    /// Apaga as linhas `a..=b` inteiras; o cursor fica no início do que as seguia.
+    fn delete_lines(&mut self, a: usize, b: usize) {
+        let n = self.ui.tab().lines.len();
+        let (start, end, at) = if b + 1 < n {
+            (Cursor::new(a, 0), Cursor::new(b + 1, 0), Cursor::new(a, 0))
+        } else if a > 0 {
+            let prev_len = self.ui.tab().line_text(a - 1).len();
+            (Cursor::new(a - 1, prev_len), Cursor::new(b, self.ui.tab().line_text(b).len()), Cursor::new(a - 1, prev_len))
+        } else {
+            (Cursor::new(0, 0), Cursor::new(b, self.ui.tab().line_text(b).len()), Cursor::new(0, 0))
+        };
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        tab.editor.delete_range(start, end);
+        let change = tab.editor.finish_change();
+        tab.editor.set_cursor(at);
+        self.after_change(change, true);
+    }
+
+    /// Põe o cursor em `to` e, se for linha estrutural, acomoda-o como uma seta faria.
+    fn settle_after_move(&mut self, to: Cursor, before: Cursor, forward: bool, horizontal: bool) {
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.set_cursor(to);
+        self.settle_cursor(before, forward, horizontal);
+        self.wake_cursor();
+        self.request_redraw();
+    }
+
     /// Apaga a linha `i` inteira (com a quebra que a segue, ou a anterior se for a última).
     fn delete_whole_line(&mut self, i: usize) {
         let n = self.ui.tab().lines.len();
@@ -3331,6 +3456,18 @@ impl App {
                 tab.editor.set_cursor(Cursor::new(cur.line - 1, 0));
                 return;
             }
+            // No início de uma linha após `:::`/`|||`/`|---|`: nunca funde com a
+            // linha estrutural. Bloco de colunas vazio some inteiro; senão o
+            // cursor só anda para a célula anterior.
+            if cur.index == 0 && cur.line > 0 && tab.lines.get(cur.line - 1).is_some_and(|l| l.skip_cursor() && !l.folded) {
+                if let Some(bi) = tab.col_block_of(cur.line - 1).filter(|&bi| tab.col_block_empty(bi)) {
+                    let (start, end) = (tab.columns[bi].start, tab.columns[bi].end);
+                    self.delete_lines(start, end);
+                    return;
+                }
+                self.settle_after_move(Cursor::new(cur.line - 1, 0), cur, false, true);
+                return;
+            }
         }
         self.edit(Action::Backspace, false);
     }
@@ -3349,6 +3486,10 @@ impl App {
                 self.delete_whole_line(cur.line + 1);
                 let (_, tab) = self.ui.ed();
                 tab.editor.set_cursor(cur);
+                return;
+            }
+            // No fim de uma linha antes de `|||`/`:::`/`|---|`: não funde.
+            if cur.index >= len && tab.lines.get(cur.line + 1).is_some_and(|l| l.skip_cursor() && !l.folded) {
                 return;
             }
         }
@@ -3441,6 +3582,7 @@ impl App {
     }
 
     fn smart_enter(&mut self) {
+        self.leave_structural();
         let tab = self.ui.tab();
         let cur = tab.editor.cursor();
         let line = tab.line_text(cur.line);
@@ -3687,6 +3829,9 @@ impl App {
             return;
         }
         let j = j as usize;
+        if tab.lines.get(j).is_some_and(|l| l.skip_cursor()) || tab.lines.get(cur.line).is_some_and(|l| l.skip_cursor()) {
+            return;
+        }
         let a = tab.line_text(cur.line);
         let b = tab.line_text(j);
         let (_, tab) = self.ui.ed();
@@ -3719,6 +3864,19 @@ impl App {
         let cur = tab.editor.cursor();
         let n = tab.editor.with_buffer(|b| b.lines.len());
         let len = tab.line_text(cur.line).len();
+        if tab.lines.get(cur.line).is_some_and(|l| l.skip_cursor()) {
+            return;
+        }
+        // Única linha da sua coluna: só esvazia, para a coluna continuar existindo.
+        if tab.column_of(cur.line).is_some_and(|(bi, ci)| tab.columns[bi].cols[ci].map.len() == 1) {
+            let (_, tab) = self.ui.ed();
+            tab.editor.set_selection(Selection::None);
+            tab.editor.start_change();
+            tab.editor.delete_range(Cursor::new(cur.line, 0), Cursor::new(cur.line, len));
+            let change = tab.editor.finish_change();
+            self.after_change(change, true);
+            return;
+        }
         let (_, tab) = self.ui.ed();
         tab.editor.set_selection(Selection::None);
         tab.editor.start_change();
@@ -4847,7 +5005,9 @@ impl App {
                         }
                     };
                     let (fs, tab) = self.ui.ed();
+                    let before = tab.editor.cursor();
                     tab.editor.action(fs, action);
+                    self.settle_cursor(before, true, false);
                     self.pointer_down = true;
                     self.wake_cursor();
                     self.request_redraw();
