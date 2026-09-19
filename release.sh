@@ -59,8 +59,9 @@ git -C "$W" init -q -b gh-pages && git -C "$W" add -A && git -C "$W" commit -q -
 git -C "$W" push -q -f git@github.com:tevoetals/fastnotes.git gh-pages
 rm -rf "$W"
 echo "✔ v$VER publicada em https://tevoetals.github.io/fastnotes (Discover atualiza em ~1 h)"
-# 5. Flathub (só depois de o app ser aceito lá; o clone aponta para flathub/$ID)
-if [[ -d $FLATHUB/.git ]]; then
+# 5. Flathub: só quando o clone apontar para o repositório oficial flathub/$ID
+#    (o fork da submissão é do usuário; não é atualizado automaticamente)
+if [[ -d $FLATHUB/.git ]] && git -C "$FLATHUB" remote get-url origin | grep -q "flathub/$ID"; then
   cp "flatpak/$ID.yml" flatpak/cargo-sources.json "$FLATHUB/"
   git -C "$FLATHUB" add -A
   git -C "$FLATHUB" commit -q -m "Update to v$VER" || true
