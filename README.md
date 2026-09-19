@@ -130,8 +130,10 @@ linhas `:::` e `|||` ficam invisíveis e o cursor nunca para nelas: as setas
 andam em grade, como no Notion e nos editores ProseMirror (o "gap cursor"
 pula posições sem texto).
 
-- `→` no fim de uma coluna vai ao início da seguinte; `←` no início volta ao
-  fim da anterior; na última/primeira coluna saem do bloco.
+- `→` no fim de uma coluna vai ao início da seguinte; no fim da última
+  coluna abre uma linha nova na coluna 1 (a grade ganha uma "linha", como
+  numa tabela). `←` no início de uma coluna volta ao fim da anterior; na
+  coluna 1 sai para a linha acima do bloco.
 - `↑` na primeira linha de qualquer coluna vai à linha acima do bloco; `↓` na
   última linha vai à linha abaixo. Chegando de cima ou de baixo, o cursor
   entra na primeira coluna.

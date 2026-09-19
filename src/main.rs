@@ -3183,7 +3183,7 @@ impl App {
     }
 
     fn motion(&mut self, m: Motion, shift: bool) {
-        let (fs, tab) = self.ui.ed();
+        let (_, tab) = self.ui.ed();
         if shift {
             if tab.editor.selection() == Selection::None {
                 tab.editor.set_selection(Selection::Normal(tab.editor.cursor()));
@@ -3192,6 +3192,17 @@ impl App {
             tab.editor.set_selection(Selection::None);
         }
         let before = tab.editor.cursor();
+        if matches!(m, Motion::Left | Motion::Right | Motion::LeftWord | Motion::RightWord)
+            && self.column_grid_move(matches!(m, Motion::Right | Motion::RightWord))
+        {
+            if shift {
+                self.update_primary();
+            }
+            self.wake_cursor();
+            self.request_redraw();
+            return;
+        }
+        let (fs, tab) = self.ui.ed();
         // Home alterna entre o primeiro caractere não-branco e a coluna 0.
         let m = if m == Motion::Home {
             let text = tab.line_text(before.line);
@@ -3256,8 +3267,8 @@ impl App {
                     let from = tab.column_of(before.line).filter(|&(fb, _)| fb == bi).map(|(_, ci)| ci);
                     let last = b.cols.len() - 1;
                     let (ci, at_start, exit) = match (from, forward, horizontal) {
-                        (Some(ci), true, true) if ci < last => (ci + 1, true, None),
-                        (Some(ci), false, true) if ci > 0 => (ci - 1, false, None),
+                        // De dentro do bloco só se chega aqui por ↑/↓ (← e → andam
+                        // em grade em `column_grid_move`): sai por baixo ou por cima.
                         (Some(_), true, _) => (0, true, Some(after(b.end))),
                         (Some(_), false, _) => (0, true, Some(above(b.start))),
                         (None, true, _) => (0, true, None),
@@ -3278,18 +3289,8 @@ impl App {
                 None => if forward { after(c.line) } else { above(c.line) },
             };
             if let Some((bi, ci)) = heal {
-                // Coluna sem nenhuma linha: cria uma vazia logo após o separador.
-                if let Some(sep) = tab.col_sep_line(bi, ci) {
-                    let len = tab.line_text(sep).len();
-                    let (_, tab) = self.ui.ed();
-                    tab.editor.set_selection(Selection::None);
-                    tab.editor.start_change();
-                    tab.editor.insert_at(Cursor::new(sep, len), "\n", None);
-                    let change = tab.editor.finish_change();
-                    tab.editor.set_cursor(Cursor::new(sep + 1, 0));
-                    self.after_change(change, true);
-                    return;
-                }
+                self.create_col_line(bi, ci);
+                return;
             }
             let target = target.or_else(|| if forward { above(c.line) } else { after(c.line) });
             let (_, tab) = self.ui.ed();
@@ -3301,6 +3302,70 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Cria uma linha vazia no fim da coluna `ci` (ou logo após o seu separador,
+    /// se ela não tiver nenhuma) e põe o cursor nela.
+    fn create_col_line(&mut self, bi: usize, ci: usize) {
+        let tab = self.ui.tab();
+        let Some(b) = tab.columns.get(bi) else { return };
+        let at = match b.cols.get(ci).filter(|c| !c.map.is_empty()) {
+            Some(c) => Cursor::new(c.last, tab.line_text(c.last).len()),
+            None => match tab.col_sep_line(bi, ci) {
+                Some(sep) => Cursor::new(sep, tab.line_text(sep).len()),
+                None => return,
+            },
+        };
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        tab.editor.insert_at(at, "\n", None);
+        let change = tab.editor.finish_change();
+        tab.editor.set_cursor(Cursor::new(at.line + 1, 0));
+        self.after_change(change, true);
+    }
+
+    /// ← / → nas bordas de uma célula de colunas andam em grade, como numa
+    /// tabela: → no fim da linha `r` da coluna `ci` vai à linha `r` da coluna
+    /// seguinte (criando-a se não existir); no fim da última coluna vai à linha
+    /// `r+1` da coluna 1. ← faz o inverso; na primeira célula sai do bloco por
+    /// cima. Devolve `false` se o cursor não está numa borda de célula.
+    fn column_grid_move(&mut self, right: bool) -> bool {
+        let tab = self.ui.tab();
+        let c = tab.editor.cursor();
+        let Some((bi, ci)) = tab.column_of(c.line) else { return false };
+        let len = tab.line_text(c.line).len();
+        if (right && c.index < len) || (!right && c.index > 0) {
+            return false;
+        }
+        let b = &tab.columns[bi];
+        let last = b.cols.len() - 1;
+        let r = b.cols[ci].map.iter().position(|&m| m == c.line).unwrap_or(0);
+        let end_of = |l: usize| Cursor::new(l, tab.line_text(l).len());
+        let target: Result<Cursor, usize> = if right {
+            let (tci, tr) = if ci < last { (ci + 1, r) } else { (0, r + 1) };
+            b.cols[tci].map.get(tr).map(|&l| Cursor::new(l, 0)).ok_or(tci)
+        } else if ci > 0 {
+            let m = &b.cols[ci - 1].map;
+            m.get(r).or(m.last()).map(|&l| end_of(l)).ok_or(ci - 1)
+        } else if r > 0 {
+            let m = &b.cols[last].map;
+            m.get(r - 1).or(m.last()).map(|&l| end_of(l)).ok_or(last)
+        } else {
+            match (b.start > 0).then(|| end_of(b.start - 1)) {
+                Some(t) => Ok(t),
+                None => return true,
+            }
+        };
+        match target {
+            Ok(t) => {
+                let (_, tab) = self.ui.ed();
+                tab.editor.set_cursor(t);
+                self.settle_cursor(c, !right, true);
+            }
+            Err(tci) => self.create_col_line(bi, tci),
+        }
+        true
     }
 
     /// Antes de editar: um cursor parado numa linha estrutural vai para a
@@ -3465,7 +3530,13 @@ impl App {
                     self.delete_lines(start, end);
                     return;
                 }
-                self.settle_after_move(Cursor::new(cur.line - 1, 0), cur, false, true);
+                if tab.column_of(cur.line).is_some() {
+                    self.column_grid_move(false);
+                } else {
+                    self.settle_after_move(Cursor::new(cur.line - 1, 0), cur, false, true);
+                }
+                self.wake_cursor();
+                self.request_redraw();
                 return;
             }
         }
