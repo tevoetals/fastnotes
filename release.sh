@@ -10,6 +10,7 @@ VER=${1:?versão, ex.: 0.3.0}
 NOTES=${2:?descrição curta da versão}
 FLATHUB=${FLATHUB_DIR:-$HOME/Programs/flathub-$ID}
 [[ -z "$(git status --porcelain)" ]] || { echo "árvore suja: commit antes"; exit 1; }
+git rev-parse -q --verify "refs/tags/v$VER" >/dev/null && { echo "a tag v$VER já existe: use outra versão"; exit 1; }
 DATE=$(date +%F)
 
 # 1. versão + changelog
