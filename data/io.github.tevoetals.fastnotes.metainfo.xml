@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.2.2" date="2026-09-18">
+      <description>
+        <p>Colunas: as setas andam em grade entre as células, linha a linha, criando a célula vizinha quando falta; Backspace e Delete não quebram mais o bloco.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-09-18">
       <description>
         <p>Colunas: as setas passam de uma coluna à outra sem parar nas linhas invisíveis; Backspace e Delete não quebram mais o bloco.</p>
