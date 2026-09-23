@@ -144,6 +144,23 @@ pula posições sem texto).
 - Uma coluna que ficou sem nenhuma linha (por edição externa, por exemplo)
   ganha uma linha vazia assim que o cursor entra nela.
 
+**Largura das colunas pelo mouse.** Passe o mouse no divisor entre duas
+colunas: o cursor vira `↔` e o divisor acende. Arraste para aproximar ou
+afastar o texto; a coluna vizinha cede o espaço (mínimo de 48 px cada). A
+borda direita do bloco também tem uma alça invisível: arrastada, alarga a
+última coluna até a margem direita da janela, além da largura de leitura.
+Duplo clique num divisor volta às colunas iguais. Cada arraste é um único
+`Ctrl+Z`. As larguras ficam na linha de abertura, em porcentagem da largura
+de leitura (a soma pode passar de 100 quando o bloco foi alargado):
+
+```markdown
+::: 30 70
+coluna estreita
+|||
+coluna larga
+:::
+```
+
 Tabelas dentro de colunas aparecem sem a grade.
 
 ### Imagens
@@ -273,6 +290,76 @@ Mouse: clique, arraste, duplo clique (palavra), triplo (linha), roda para rolar,
 clique no checkbox alterna, botão do meio cola a seleção primária.
 
 O título da nota (na aba e na lista) é a primeira linha não vazia.
+
+## Telegram: ver e editar as notas pelo celular
+
+O programa `fastnotes-telegram` (instalado junto pelo `install.sh`) liga as
+notas deste PC a um bot do Telegram que só responde a você.
+
+**1. Crie o bot (2 minutos, no celular ou no Telegram Desktop).**
+
+1. Abra uma conversa com [@BotFather](https://t.me/BotFather) e envie `/newbot`.
+2. Escolha um nome (ex.: `Minhas Notas`) e um usuário terminado em `bot`
+   (ex.: `tevo_notas_bot`).
+3. O BotFather responde com o **token**, algo como
+   `7123456789:AAH…`. É a senha do bot: quem a tem controla o bot.
+
+**2. Ligue o bot a este PC.** Mande o token ao Claude nesta conversa, ou rode
+você mesmo (assim o token não passa por nenhum chat):
+
+```sh
+fastnotes-telegram setup 7123456789:AAH…   # valida o token e mostra um link
+fastnotes-telegram enable                  # serviço systemd de usuário, sobe com a sessão
+```
+
+**3. Pareie.** Abra o link `https://t.me/<seu_bot>?start=<código>` que o
+`setup` mostrou e toque em **Iniciar**. O bot responde "Pareado!" e, dali em
+diante, ignora qualquer outra pessoa que o encontre.
+
+**Uso.** O teclado do bot tem **📒 Notas** e **➕ Nova nota**. O Telegram não
+tem menu suspenso; a lista vem como botões, 8 notas por página, da mais
+recente para a mais antiga. Tocando numa nota o bot mostra o texto num bloco
+que se copia com um toque, com os botões:
+
+- **✏️ Substituir**: o próximo texto que você mandar vira a nota inteira.
+  Copie o bloco, cole, edite e envie.
+- **➕ Acrescentar**: o próximo texto vai para o fim da nota.
+- **📄 Arquivo .md**: a nota como arquivo. Notas longas (mais de 3500
+  caracteres) já vêm assim; edite e mande o `.md` de volta.
+- **🗑 Lixeira**: pede confirmação e move para a lixeira do Fast Notes.
+
+Texto mandado sem contexto pergunta se vira nota nova ou se vai para o fim de
+uma nota existente. `/cancelar` desiste de uma edição em andamento.
+
+**Markdown preservado.** O app do Telegram transforma `**negrito**`,
+`*itálico*`, `` `código` ``, `~~riscado~~`, blocos ```` ``` ```` e links em
+formatação e apaga os marcadores ao enviar; o bot recoloca os marcadores a
+partir da formatação recebida, então a nota continua Markdown.
+
+**Nada se perde.** Antes de substituir ou acrescentar, a versão anterior é
+copiada para a lixeira (`trash/<nota>.antes-telegram-<data>.md`). O Fast Notes
+observa a pasta de notas (inotify, sem custo em repouso): se a nota está
+aberta e sem edição pendente, a aba recarrega na hora, mantendo o cursor. Se
+você estava editando a mesma nota no PC, a sua versão vence e a que veio de
+fora vai para a lixeira como `<nota>.conflito-<data>.md`, com aviso no rodapé.
+
+**Comandos.**
+
+```sh
+fastnotes-telegram status    # bot, chat pareado e estado do serviço
+fastnotes-telegram disable   # desliga e remove o serviço
+```
+
+O token e o chat pareado ficam em `~/.config/fastnotes/telegram.conf`
+(permissão 600). Token vazado: envie `/revoke` ao BotFather e rode `setup` com
+o novo. Se você usa a versão da loja (Flatpak), o bot encontra as notas em
+`~/.var/app/io.github.tevoetals.fastnotes/` sozinho. O bot roda no PC:
+com o PC desligado ele não responde.
+
+**Teste local.** `FASTNOTES_TG_API=http://127.0.0.1:porta` aponta o bot para
+um servidor falso da API do Telegram; foi assim que o fluxo inteiro (pareamento,
+chat estranho ignorado, lista, substituir com negrito, acrescentar, nota nova
+por texto e por arquivo, lixeira) e a recarga ao vivo no app foram testados.
 
 ## Onde ficam as notas
 

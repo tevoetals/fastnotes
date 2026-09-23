@@ -16,6 +16,10 @@ pub struct Undo {
     redo: Vec<Change>,
     last_edit: Option<Instant>,
     group_start: Option<Instant>,
+    /// Durante um arraste (divisor de colunas, canto de imagem) tudo vira um
+    /// só passo: `Some(false)` = o próximo registro abre o grupo, `Some(true)`
+    /// = os seguintes se juntam a ele.
+    hold: Option<bool>,
 }
 
 impl Undo {
@@ -29,10 +33,14 @@ impl Undo {
             return;
         }
         let t = Instant::now();
-        let merge = match (self.last_edit, self.group_start) {
-            (Some(le), Some(gs)) => t - le <= GAP && t - gs <= MAX_GROUP && !self.stack.is_empty(),
+        let merge = match (self.hold, self.last_edit, self.group_start) {
+            (Some(held), _, _) => held && !self.stack.is_empty(),
+            (None, Some(le), Some(gs)) => t - le <= GAP && t - gs <= MAX_GROUP && !self.stack.is_empty(),
             _ => false,
         };
+        if self.hold == Some(false) {
+            self.hold = Some(true);
+        }
         if merge {
             if let Some(last) = self.stack.last_mut() {
                 last.items.extend(change.items);
@@ -69,6 +77,17 @@ impl Undo {
         self.stack.push(c.clone());
         self.close_group();
         Some(c)
+    }
+
+    /// Começa um arraste: as alterações até `release` formam um só passo.
+    pub fn hold(&mut self) {
+        self.close_group();
+        self.hold = Some(false);
+    }
+
+    pub fn release(&mut self) {
+        self.hold = None;
+        self.close_group();
     }
 
     fn close_group(&mut self) {

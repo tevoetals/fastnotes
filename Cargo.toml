@@ -11,9 +11,11 @@ fontdb = "0.23"
 image-webp = "0.2"
 libc = "0.2"
 png = "0.18"
+serde_json = "1" # só fastnotes-telegram (o app não linka)
 smithay-client-toolkit = { version = "0.21", features = ["calloop", "xkbcommon"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
+ureq = "3" # só fastnotes-telegram
 xkbcommon = "0.8"
 zune-jpeg = "0.4"
 

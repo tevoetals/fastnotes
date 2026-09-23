@@ -115,7 +115,8 @@ pub fn analyze<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<LineInfo> {
             continue;
         }
         let t = lines[i].trim();
-        match (t, start) {
+        let fence = col_fence(t).is_some();
+        match (if fence { ":::" } else { t }, start) {
             (":::", None) => {
                 out[i] = structural(lines[i], Block::ColStart);
                 start = Some(i);
@@ -157,6 +158,19 @@ pub fn analyze<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<LineInfo> {
         }
     }
     out
+}
+
+/// Linha `:::` de colunas, com larguras opcionais em porcentagem
+/// (`::: 30 70`). Devolve as larguras (vazio = todas iguais).
+pub fn col_fence(t: &str) -> Option<Vec<u16>> {
+    let rest = t.trim().strip_prefix(":::")?;
+    if rest.is_empty() {
+        return Some(Vec::new());
+    }
+    if !rest.starts_with(' ') {
+        return None;
+    }
+    rest.split_whitespace().map(|w| w.parse::<u16>().ok().filter(|&n| n > 0)).collect()
 }
 
 fn structural(line: &str, block: Block) -> LineInfo {
@@ -1137,6 +1151,15 @@ mod tests {
         assert!(!v[1].folded);
         assert_eq!(v[2].block, Block::Toggle(false));
         assert!(v[3].folded && v[5].folded && !v[6].folded);
+        assert_eq!(col_fence(":::"), Some(vec![]));
+        assert_eq!(col_fence("::: 30 70"), Some(vec![30, 70]));
+        assert_eq!(col_fence(":::x"), None);
+        assert_eq!(col_fence("::: a"), None);
+        let w = analyze([":::  25 75", "a", "|||", "b", ":::"].into_iter());
+        assert_eq!(w[0].block, Block::ColStart);
+        assert_eq!(w[1].col, Some((0, 0)));
+        assert_eq!(w[3].col, Some((0, 1)));
+        assert_eq!(w[4].block, Block::ColEnd);
         assert_eq!(v[7].block, Block::ColStart);
         assert_eq!(v[8].col, Some((7, 0)));
         assert_eq!(v[9].block, Block::ColSep);

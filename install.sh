@@ -6,11 +6,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ID=io.github.tevoetals.fastnotes
 BIN="$HOME/.local/bin/fastnotes"
+TG="$HOME/.local/bin/fastnotes-telegram"
 APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 FONTS="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/fastnotes"
 if [[ "${1:-}" == "--uninstall" ]]; then
-  rm -f "$BIN" "$APPS/$ID.desktop" "$APPS/fastnotes.desktop" "$ICONS/$ID.svg"
+  if [[ -x "$TG" ]]; then "$TG" disable >/dev/null 2>&1 || true; fi
+  rm -f "$BIN" "$TG" "$APPS/$ID.desktop" "$APPS/fastnotes.desktop" "$ICONS/$ID.svg"
   rm -rf "$FONTS"
   fc-cache -f >/dev/null 2>&1 || true
   update-desktop-database "$APPS" 2>/dev/null || true
@@ -20,6 +22,9 @@ fi
 # Otimiza para esta CPU (o build do Flatpak usa o padrão portátil).
 RUSTFLAGS="${RUSTFLAGS:--C target-cpu=native}" cargo build --release
 install -Dm755 target/release/fastnotes "$BIN"
+install -Dm755 target/release/fastnotes-telegram "$TG"
+# Serviço do Telegram já ligado: reinicia com o binário novo.
+systemctl --user try-restart fastnotes-telegram.service 2>/dev/null || true
 # Fonte Inter (OFL) — usada pelo app e disponível ao sistema.
 install -Dm644 fonts/InterVariable.ttf fonts/InterVariable-Italic.ttf fonts/LICENSE-Inter.txt -t "$FONTS"
 fc-cache -f "$FONTS" >/dev/null 2>&1 || true

@@ -662,6 +662,56 @@ fn locale() -> String {
         .unwrap_or_else(|| "en-US".to_string())
 }
 
+fn file_mtime(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).ok()?.modified().ok()
+}
+
+/// Observa a pasta de notas (inotify): nomes de arquivo `.md` gravados,
+/// renomeados ou apagados ali chegam em `App::on_disk_change`. Sem custo em
+/// repouso: o kernel acorda o laço de eventos só quando algo muda.
+fn watch_notes(dir: &Path) -> Option<std::fs::File> {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let cdir = std::ffi::CString::new(dir.as_os_str().as_bytes()).ok()?;
+    // SAFETY: chamadas simples de libc; o fd passa a pertencer ao File.
+    unsafe {
+        let fd = libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC);
+        if fd < 0 {
+            return None;
+        }
+        let mask = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_MOVED_FROM | libc::IN_DELETE;
+        if libc::inotify_add_watch(fd, cdir.as_ptr(), mask) < 0 {
+            libc::close(fd);
+            return None;
+        }
+        Some(std::fs::File::from_raw_fd(fd))
+    }
+}
+
+/// Lê os eventos pendentes do inotify e devolve os nomes `.md` afetados.
+fn read_inotify(f: &mut std::fs::File) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(n) if n > 0 => n,
+            _ => break,
+        };
+        let mut i = 0;
+        // struct inotify_event { int wd; uint32 mask, cookie, len; char name[len]; }
+        while i + 16 <= n {
+            let len = u32::from_ne_bytes(buf[i + 12..i + 16].try_into().unwrap()) as usize;
+            let raw = &buf[i + 16..(i + 16 + len).min(n)];
+            let name = String::from_utf8_lossy(raw.split(|&b| b == 0).next().unwrap_or(&[])).into_owned();
+            if name.ends_with(".md") && !names.contains(&name) {
+                names.push(name);
+            }
+            i += 16 + len;
+        }
+    }
+    names
+}
+
 /// Diretório com `InterVariable.ttf`: instalado pelo install.sh, pacote do
 /// sistema ou a pasta `fonts/` do repositório (execução via cargo).
 fn inter_dir() -> Option<PathBuf> {
@@ -758,6 +808,11 @@ struct Tab {
     undo: Undo,
     path: Option<PathBuf>,
     saved_text: String,
+    /// mtime do arquivo na última leitura/gravação feita pelo app: outra
+    /// mtime no disco = alguém de fora (o bot do Telegram) mudou a nota.
+    disk_mtime: Option<std::time::SystemTime>,
+    /// Houve conflito com uma gravação de fora: o próximo "salvo" avisa.
+    conflict: bool,
     status: String,
     title: String,
     words: usize,
@@ -859,12 +914,56 @@ fn cell_index(pipes: &[usize], idx: usize, ncells: usize) -> usize {
     pipes.iter().filter(|&&p| p < idx).count().saturating_sub(1).min(ncells.saturating_sub(1))
 }
 
+/// Largura mínima de uma coluna, em px, ao arrastar o divisor.
+const COL_MIN_W: f32 = 48.0;
+/// Meia largura da área de arraste do divisor de colunas.
+const COL_GRIP: i32 = 5;
+
+/// Larguras em px a partir das porcentagens de `::: 30 70`, relativas à
+/// largura de leitura `base` (faltando ou inválidas → iguais, somando 100 %).
+/// A soma pode passar de 100 %: o bloco se estende até `max` (margem direita).
+fn col_widths(pct: Vec<u16>, n: usize, base: f32, max: f32) -> Vec<f32> {
+    let pct: Vec<f32> = if pct.len() == n { pct.into_iter().map(f32::from).collect() } else { vec![100.0 / n as f32; n] };
+    let sum: f32 = pct.iter().sum::<f32>().max(1.0);
+    let avail = (base * sum / 100.0).min(max.max(base));
+    let min = COL_MIN_W.min(avail / n as f32);
+    let mut w: Vec<f32> = pct.iter().map(|p| (avail * p / sum).max(min)).collect();
+    // Se o mínimo empurrou a soma para cima, tira o excesso das mais largas.
+    let excess = w.iter().sum::<f32>() - avail;
+    if excess > 0.5 {
+        let room: f32 = w.iter().map(|x| x - min).sum::<f32>().max(1.0);
+        for x in &mut w {
+            *x -= excess * (*x - min) / room;
+        }
+    }
+    w
+}
+
+/// Arraste do divisor entre as colunas `ci - 1` e `ci` do bloco `bi`
+/// (`ci == n`: borda direita, que alarga o bloco inteiro).
+struct ColDrag {
+    bi: usize,
+    ci: usize,
+    /// Linha `:::` de abertura, onde ficam as porcentagens.
+    line: usize,
+    x0: i32,
+    /// Larguras (px) no início do arraste; 100 % e máximo do bloco.
+    w0: Vec<f32>,
+    base: f32,
+    max: f32,
+}
+
 /// Bloco de colunas renderizado no espaço da linha `:::` inicial.
 struct ColBlock {
     start: usize,
     /// Última linha do bloco (o `:::` de fecho, ou a última linha se não houver).
     end: usize,
     height: f32,
+    /// Espaço entre colunas; largura das colunas somadas a 100 % (medida de
+    /// leitura) e o máximo até a margem direita (px).
+    gap: f32,
+    base: f32,
+    max: f32,
     cols: Vec<ColText>,
 }
 
@@ -927,6 +1026,8 @@ impl Tab {
             undo: Undo::default(),
             path: None,
             saved_text: String::new(),
+            disk_mtime: None,
+            conflict: false,
             status: "nova nota".to_string(),
             title: "Nova nota".to_string(),
             words: 0,
@@ -1143,8 +1244,12 @@ impl Tab {
             let end = if j < n && self.lines[j].block == Block::ColEnd { j } else { j.saturating_sub(1).max(start) };
             let seps = (i + 1..j).filter(|&k| self.lines[k].block == Block::ColSep).count();
             let ncols = (seps + 1).min(md::MAX_COLS as usize);
-            let colw = ((text_w - gap * (ncols as f32 - 1.0)) / ncols as f32).max(40.0);
+            let gaps = gap * (ncols as f32 - 1.0);
+            let base = (text_w - gaps).max(40.0 * ncols as f32);
+            let max = (self.wide_w - gaps).max(base);
+            let widths = col_widths(md::col_fence(&texts[start]).unwrap_or_default(), ncols, base, max);
             let mut cols = Vec::new();
+            let mut cx = 0.0;
             let mut max_h: f32 = 0.0;
             for c in 0..ncols {
                 let members: Vec<usize> = (i + 1..j).filter(|&k| self.lines[k].col == Some((start, c as u8)) && !self.lines[k].folded).collect();
@@ -1186,6 +1291,7 @@ impl Tab {
                         pieces.push((String::new(), base.clone()));
                     }
                 }
+                let colw = widths[c];
                 let mut buffer = Buffer::new(fs, Metrics::new(font_px, body_lh(font_px)));
                 buffer.set_wrap(Wrap::WordOrGlyph);
                 buffer.set_tab_width(4);
@@ -1194,9 +1300,10 @@ impl Tab {
                 buffer.shape_until_scroll(fs, false);
                 let h = buffer.layout_runs().last().map(|r| r.line_top + r.line_height).unwrap_or(body_lh(font_px));
                 max_h = max_h.max(h);
-                cols.push(ColText { first, last, map: members, x: c as f32 * (colw + gap), w: colw, buffer });
+                cols.push(ColText { first, last, map: members, x: cx, w: colw, buffer });
+                cx += colw + gap;
             }
-            self.columns.push(ColBlock { start, end, height: max_h + pad * 2.0, cols });
+            self.columns.push(ColBlock { start, end, height: max_h + pad * 2.0, gap, base, max, cols });
             i = j + 1;
         }
     }
@@ -1375,8 +1482,13 @@ impl Tab {
         };
         match store.write(&path, &text) {
             Ok(()) => {
+                self.disk_mtime = file_mtime(&path);
                 self.saved_text = text;
-                self.status = format!("salvo · {}", store::now_hm());
+                self.status = if std::mem::take(&mut self.conflict) {
+                    format!("salvo · {} · a versão de fora está na lixeira", store::now_hm())
+                } else {
+                    format!("salvo · {}", store::now_hm())
+                };
             }
             Err(e) => self.status = format!("erro ao salvar: {e}"),
         }
@@ -1447,6 +1559,8 @@ struct Hits {
     toggles: Vec<(Rect, usize, usize)>,
     /// (retângulo na tela, bloco, coluna)
     cols: Vec<(Rect, usize, usize)>,
+    /// Divisores arrastáveis: (área de arraste, bloco, coluna à direita).
+    col_divs: Vec<(Rect, usize, usize)>,
     cells: Vec<CellHit>,
     images: Vec<ImgHit>,
 }
@@ -1477,6 +1591,10 @@ struct Ui {
     cursor_visible: bool,
     hover: (i32, i32),
     hits: Hits,
+    /// Divisor de colunas sob o mouse (bloco, coluna à direita).
+    col_hover: Option<(usize, usize)>,
+    /// Arraste de um divisor de colunas em andamento.
+    col_drag: Option<ColDrag>,
     traced: bool,
     prof: Option<Prof>,
     labels: Vec<(LabelKey, Buffer)>,
@@ -1522,6 +1640,11 @@ impl Ui {
         tabs[*active].restyle(font_system, images, fp);
     }
 
+    /// Divisor de colunas a realçar: o que está sendo arrastado ou sob o mouse.
+    fn col_div_active(&self) -> Option<(usize, usize)> {
+        self.col_drag.as_ref().map(|d| (d.bi, d.ci)).or(self.col_hover)
+    }
+
     fn new_tab(&mut self) -> usize {
         let fp = self.font_px();
         let t = Tab::new(&mut self.font_system, fp);
@@ -1546,6 +1669,7 @@ impl Ui {
         let Ui { font_system, images, tabs, .. } = self;
         let tab = &mut tabs[i];
         tab.load(&text, font_system, images, fp);
+        tab.disk_mtime = mtime;
         tab.path = path;
         tab.status = match mtime {
             Some(t) => format!("salvo · {}", store::fmt_date(t)),
@@ -1853,8 +1977,10 @@ impl Ui {
         let mut checkboxes = Vec::new();
         let mut toggles = Vec::new();
         let mut cols = Vec::new();
+        let mut col_divs = Vec::new();
         let mut cells = Vec::new();
         let mut img_hits = Vec::new();
+        let div_active = self.col_div_active();
         {
             let Ui { font_system, swash, tabs, active, traced, images, prof, .. } = self;
             let traced_flag = traced;
@@ -1893,17 +2019,27 @@ impl Ui {
                 b.layout_runs().filter(|r| tab.lines.get(r.line_i).is_some_and(|l| l.block == Block::ColStart)).map(|r| (r.line_i, r.line_top as i32)).collect()
             });
             let pad = (font_px * 0.5).round() as i32;
-            let gap = (font_px * 1.4).round() as i32;
             for (bi, block) in tab.columns.iter_mut().enumerate() {
                 let Some(&(_, top)) = block_tops.iter().find(|(l, _)| *l == block.start) else { continue };
                 let y0 = oy + top + pad;
                 let inner_h = block.height as i32 - 2 * pad;
+                let ncols = block.cols.len();
+                let block_gap = block.gap as i32;
                 for (ci, col) in block.cols.iter_mut().enumerate() {
                     let x0 = ox + col.x as i32;
                     let rect = Rect::new(x0, y0, col.w as i32, inner_h);
                     canvas.set_clip(rect.intersect(&editor));
                     if ci > 0 {
-                        canvas.rect(x0 - gap / 2, y0, 1, inner_h, LINE);
+                        let gx = x0 - block_gap / 2;
+                        let hot = div_active == Some((bi, ci));
+                        canvas.set_clip(editor);
+                        if hot {
+                            canvas.rect(gx - 1, y0, 3, inner_h, DIM);
+                        } else {
+                            canvas.rect(gx, y0, 1, inner_h, LINE);
+                        }
+                        canvas.set_clip(rect.intersect(&editor));
+                        col_divs.push((Rect::new(gx - COL_GRIP, y0, 2 * COL_GRIP + 1, inner_h), bi, ci));
                     }
                     if let Some((s, e)) = sel {
                         if s.line <= col.last && e.line >= col.first && !col.map.is_empty() {
@@ -1944,6 +2080,15 @@ impl Ui {
                         }
                     }
                     cols.push((rect, bi, ci));
+                    if ci + 1 == ncols {
+                        // Borda direita: alça invisível até o hover.
+                        let gx = x0 + col.w as i32 + block_gap / 2;
+                        if div_active == Some((bi, ci + 1)) {
+                            canvas.set_clip(editor);
+                            canvas.rect(gx - 1, y0, 3, inner_h, DIM);
+                        }
+                        col_divs.push((Rect::new(gx - COL_GRIP, y0, 2 * COL_GRIP + 1, inner_h), bi, ci + 1));
+                    }
                 }
                 canvas.set_clip(editor);
             }
@@ -2112,6 +2257,7 @@ impl Ui {
             checkboxes,
             toggles,
             cols,
+            col_divs,
             cells,
             images: img_hits,
         };
@@ -2713,6 +2859,8 @@ fn main() {
         cursor_visible: true,
         hover: (-1, -1),
         hits: Hits::default(),
+        col_hover: None,
+        col_drag: None,
         traced: false,
         prof: Prof::new(),
         labels: Vec::new(),
@@ -2812,6 +2960,18 @@ fn main() {
 
     // Banco completo de fontes só se alguma nota aberta precisar dele.
     app.ensure_fonts_for_tabs();
+
+    // Notas mudadas fora do app (bot do Telegram, outro editor) → recarrega a aba.
+    if let Some(f) = watch_notes(&app.ui.store.notes_dir) {
+        let _ = loop_handle.insert_source(Generic::new(f, Interest::READ, Mode::Level), |_, f, app| {
+            // SAFETY: só lemos do fd do inotify; ele continua vivo no source.
+            let names = read_inotify(unsafe { f.get_mut() });
+            if !names.is_empty() {
+                app.on_disk_change(&names);
+            }
+            Ok(PostAction::Continue)
+        });
+    }
 
     // `FASTNOTES_TEST_FIFO=caminho` lê comandos de teste (eventos sintéticos) de um FIFO.
     if let Some(path) = std::env::var_os("FASTNOTES_TEST_FIFO") {
@@ -4230,6 +4390,74 @@ impl App {
         self.request_redraw();
     }
 
+    /// Arquivos `.md` mudaram no disco. Para cada aba com uma dessas notas e
+    /// mtime diferente da última leitura/gravação do app: sem edição pendente,
+    /// recarrega mantendo o cursor; com edição pendente, a versão do app vence
+    /// e a de fora é guardada na lixeira como conflito (nada se perde).
+    fn on_disk_change(&mut self, names: &[String]) {
+        let mut touched = false;
+        for i in 0..self.ui.tabs.len() {
+            let Some(path) = self.ui.tabs[i].path.clone() else { continue };
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            if !names.contains(&name) {
+                continue;
+            }
+            let disk = file_mtime(&path);
+            if disk == self.ui.tabs[i].disk_mtime {
+                continue; // gravação do próprio app
+            }
+            touched = true;
+            let dirty = self.ui.tabs[i].text() != self.ui.tabs[i].saved_text;
+            let Some(mtime) = disk else {
+                // Apagada/movida por fora: a aba fica com o texto, sem arquivo.
+                let tab = &mut self.ui.tabs[i];
+                tab.path = None;
+                tab.disk_mtime = None;
+                tab.saved_text = if dirty { String::new() } else { tab.text() };
+                tab.status = "removida fora do app".to_string();
+                continue;
+            };
+            if dirty {
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("nota").to_string();
+                let copy = self.ui.store.trash_dir.join(format!("{stem}.conflito-{}.md", store::stamp()));
+                let _ = std::fs::copy(&path, copy);
+                let tab = &mut self.ui.tabs[i];
+                tab.disk_mtime = Some(mtime);
+                tab.conflict = true;
+                tab.status = "conflito: versão de fora guardada na lixeira".to_string();
+                continue;
+            }
+            let text = self.ui.store.read(&path).unwrap_or_default();
+            let fp = self.ui.font_px();
+            let Ui { font_system, images, tabs, .. } = &mut self.ui;
+            let tab = &mut tabs[i];
+            let cur = tab.editor.cursor();
+            tab.load(&text, font_system, images, fp);
+            let n = tab.lines.len().max(1);
+            let line = cur.line.min(n - 1);
+            let len = tab.line_text(line).len();
+            let mut index = cur.index.min(len);
+            while index > 0 && !tab.line_text(line).is_char_boundary(index) {
+                index -= 1;
+            }
+            tab.editor.set_cursor(Cursor::new(line, index));
+            tab.disk_mtime = Some(mtime);
+            tab.status = format!("atualizada fora do app · {}", store::now_hm());
+        }
+        if self.ui.list_open {
+            // Atualiza a lista sem apagar a busca em andamento.
+            let sel = self.ui.list_sel;
+            self.ui.notes = self.ui.store.list();
+            self.ui.refilter();
+            self.ui.list_sel = sel.min(self.ui.filtered.len().saturating_sub(1));
+            touched = true;
+        }
+        if touched {
+            self.ensure_fonts_for_tabs();
+            self.request_redraw();
+        }
+    }
+
     fn open_note(&mut self, path: PathBuf) {
         self.flush();
         self.ui.open_in_tab(Some(path));
@@ -4455,6 +4683,55 @@ impl App {
         tab.editor.set_cursor(Cursor::new(line, new_end));
         self.after_change(change, false);
         Some(new_end)
+    }
+
+    /// Grava as larguras (px) do bloco como porcentagens na linha `:::`
+    /// de abertura; larguras praticamente iguais voltam a `:::` puro.
+    fn set_col_widths(&mut self, line: usize, w: &[f32], base: f32) {
+        let base = base.max(1.0);
+        let mut pct: Vec<i32> = w.iter().map(|x| (x / base * 100.0).round().max(1.0) as i32).collect();
+        let total = (w.iter().sum::<f32>() / base * 100.0).round() as i32;
+        let diff = total - pct.iter().sum::<i32>();
+        if let Some(m) = (0..pct.len()).max_by_key(|&i| pct[i]) {
+            pct[m] += diff;
+        }
+        let equal = (total - 100).abs() <= 1 && pct.iter().max().zip(pct.iter().min()).is_some_and(|(a, b)| a - b <= 1);
+        let new = if equal { ":::".to_string() } else { format!("::: {}", pct.iter().map(i32::to_string).collect::<Vec<_>>().join(" ")) };
+        let tab = self.ui.tab();
+        if tab.line_text(line).trim() == new || md::col_fence(&tab.line_text(line)).is_none() {
+            return;
+        }
+        let (_, tab) = self.ui.ed();
+        let cur = tab.editor.cursor();
+        let sel = tab.editor.selection();
+        tab.editor.start_change();
+        Self::replace_line(tab, line, &new);
+        let change = tab.editor.finish_change();
+        tab.editor.set_cursor(cur);
+        tab.editor.set_selection(sel);
+        self.after_change(change, false);
+    }
+
+    fn col_drag_motion(&mut self, px: i32) {
+        let Some(d) = &self.ui.col_drag else { return };
+        let dx = (px - d.x0) as f32;
+        let mut w = d.w0.clone();
+        let n = w.len();
+        if d.ci >= n {
+            // Borda direita: só a última coluna muda, até a margem direita.
+            let others: f32 = w[..n - 1].iter().sum();
+            w[n - 1] = (d.w0[n - 1] + dx).clamp(COL_MIN_W, (d.max - others).max(COL_MIN_W));
+        } else {
+            let (a, b) = (d.ci - 1, d.ci);
+            let pair = d.w0[a] + d.w0[b];
+            let min = COL_MIN_W.min(pair / 2.0);
+            let left = (d.w0[a] + dx).clamp(min, pair - min);
+            w[a] = left;
+            w[b] = pair - left;
+        }
+        let (line, base) = (d.line, d.base);
+        self.set_col_widths(line, &w, base);
+        self.request_redraw();
     }
 
     fn image_drag_motion(&mut self, px: i32) {
@@ -4865,6 +5142,25 @@ impl App {
             self.image_drag_motion(px);
             return;
         }
+        if self.ui.col_drag.is_some() {
+            self.ui.hover = (px, py);
+            self.col_drag_motion(px);
+            return;
+        }
+        let div = if self.ui.list_open || self.pointer_down {
+            None
+        } else {
+            self.ui.hits.col_divs.iter().find(|(r, _, _)| r.contains(px, py)).map(|&(_, bi, ci)| (bi, ci))
+        };
+        if div != self.ui.col_hover {
+            self.ui.col_hover = div;
+            self.request_redraw();
+        }
+        if div.is_some() {
+            self.ui.hover = (px, py);
+            self.set_cursor_icon(CursorIcon::EwResize);
+            return;
+        }
         let corner = if self.ui.list_open { None } else { self.image_corner_at(px, py) };
         let rects = self.clickable_rects();
         let over_button = rects.iter().any(|r| r.contains(px, py));
@@ -5032,9 +5328,30 @@ impl App {
             }
         }
         if button == BTN_LEFT && !self.ui.list_open {
+            if let Some(&(_, bi, ci)) = self.ui.hits.col_divs.iter().find(|(r, _, _)| r.contains(px, py)) {
+                let now = Instant::now();
+                let (t, pos, _) = self.last_click;
+                let double = now - t < Duration::from_millis(400) && (pos.0 - self.pointer_pos.0).abs() < 5.0;
+                self.last_click = (now, self.pointer_pos, 1);
+                let Some(b) = self.ui.tab().columns.get(bi) else { return };
+                let (line, base, max, w0) = (b.start, b.base, b.max, b.cols.iter().map(|c| c.w).collect::<Vec<_>>());
+                if double {
+                    // Duplo clique num divisor: colunas iguais na largura de leitura.
+                    let n = w0.len();
+                    self.set_col_widths(line, &vec![base / n as f32; n], base);
+                    self.last_click = (now - Duration::from_secs(10), self.pointer_pos, 0);
+                } else {
+                    self.ui.tab_mut().undo.hold();
+                    self.ui.col_drag = Some(ColDrag { bi, ci, line, x0: px, w0, base, max });
+                }
+                self.set_cursor_icon(CursorIcon::EwResize);
+                self.request_redraw();
+                return;
+            }
             if let Some((i, right)) = self.image_corner_at(px, py) {
                 let h = &self.ui.hits.images[i];
                 self.img_drag = Some(ImgDrag { line: h.line, start: h.start, end: h.end, w0: h.rect.w, x0: px, right });
+                self.ui.tab_mut().undo.hold();
                 self.set_cursor_icon(if right { CursorIcon::NwseResize } else { CursorIcon::NeswResize });
                 return;
             }
@@ -5096,7 +5413,15 @@ impl App {
     }
 
     fn on_pointer_release(&mut self, button: u32) {
+        if button == BTN_LEFT && self.ui.col_drag.take().is_some() {
+            // Fecha o grupo de desfazer: o arraste inteiro vira um só passo.
+            self.ui.tab_mut().undo.release();
+            self.request_redraw();
+            self.on_pointer_motion();
+            return;
+        }
         if button == BTN_LEFT && self.img_drag.take().is_some() {
+            self.ui.tab_mut().undo.release();
             self.on_pointer_motion();
             return;
         }

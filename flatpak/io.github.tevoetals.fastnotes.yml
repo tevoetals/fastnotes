@@ -25,7 +25,7 @@ modules:
     buildsystem: simple
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml --verbose
-      - cargo --offline build --release --verbose
+      - cargo --offline build --release --verbose --bin fastnotes
       - install -Dm755 target/release/fastnotes /app/bin/fastnotes
       - install -Dm644 fonts/InterVariable.ttf fonts/InterVariable-Italic.ttf fonts/LICENSE-Inter.txt -t /app/share/fonts/fastnotes
       - install -Dm644 data/io.github.tevoetals.fastnotes.desktop -t /app/share/applications
