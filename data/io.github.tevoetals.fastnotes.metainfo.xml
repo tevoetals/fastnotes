@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.3.0" date="2026-09-22">
+      <description>
+        <p>Colunas com largura ajustável pelo mouse; o app recarrega notas alteradas fora dele (base da sincronia com o Telegram).</p>
+      </description>
+    </release>
     <release version="0.2.2" date="2026-09-18">
       <description>
         <p>Colunas: as setas andam em grade entre as células, linha a linha, criando a célula vizinha quando falta; Backspace e Delete não quebram mais o bloco.</p>
