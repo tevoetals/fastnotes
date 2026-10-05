@@ -34,6 +34,6 @@ modules:
     sources:
       - type: git
         url: https://github.com/tevoetals/fastnotes.git
-        tag: v0.3.0
-        commit: a93f63edba63e53f92ed3f7d83ec3fa3b6a84383
+        tag: v0.3.1
+        commit: 70599363f0b3c0bb1aada31484470db03657ebed
       - cargo-sources.json
