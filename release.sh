@@ -41,6 +41,12 @@ git commit -q -m "Versão $VER
 $NOTES"
 git tag -a "v$VER" -m "v$VER"
 git push -q origin HEAD "v$VER"
+# Pacote portátil (Kubuntu/Ubuntu/Debian/Fedora…) anexado à versão do GitHub;
+# é o que o install.sh baixa quando não há Rust novo na máquina.
+./packaging/build-portable.sh
+gh release create "v$VER" dist/fastnotes-x86_64-linux.tar.gz --title "Fast Notes $VER" --notes "$NOTES
+
+Instalar sem compilar: baixe \`fastnotes-x86_64-linux.tar.gz\`, descompacte e rode \`./fastnotes/install.sh\`. Precisa de uma sessão Wayland." >/dev/null
 COMMIT=$(git rev-parse HEAD)
 sed -i "s/^        tag: .*/        tag: v$VER/; s/^        commit: .*/        commit: $COMMIT/" "flatpak/$ID.yml"
 git commit -q -am "flatpak: aponta para v$VER" && git push -q origin HEAD

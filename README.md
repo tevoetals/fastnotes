@@ -25,21 +25,44 @@ vivo como no Notion.
 
 ## Instalar
 
-Pela loja (Discover, GNOME Software ou qualquer loja com Flatpak): abra
-<https://tevoetals.github.io/fastnotes> e clique em **Instalar**. O arquivo
-`.flatpakref` adiciona o repositório do Fast Notes e o app passa a receber
-atualizações junto com as demais. Pelo terminal:
+O Fast Notes roda em qualquer Linux com sessão **Wayland** (Plasma 6, GNOME,
+Sway…). No Kubuntu 24.04 a sessão padrão é X11: na tela de login, escolha
+**Plasma (Wayland)** no canto inferior esquerdo antes de digitar a senha.
+Do Kubuntu 25.04 em diante o Wayland já é o padrão.
+
+**Sem terminal nem compilação (Kubuntu, Ubuntu, Debian, Fedora, Arch…).**
+Baixe `fastnotes-x86_64-linux.tar.gz` da
+[última versão](https://github.com/tevoetals/fastnotes/releases/latest),
+descompacte e rode o instalador. Não precisa de sudo nem de Rust:
 
 ```sh
-flatpak install https://tevoetals.github.io/fastnotes/fastnotes.flatpakref
+tar xzf fastnotes-x86_64-linux.tar.gz
+./fastnotes/install.sh
 ```
 
-A partir do código, otimizado para a sua CPU:
+**Pela loja (Discover).** Abra <https://tevoetals.github.io/fastnotes> e
+clique em **Instalar**; o app passa a se atualizar junto com os demais. No
+Kubuntu/Ubuntu o Discover só instala Flatpak depois de:
 
 ```sh
-./install.sh            # compila e instala em ~/.local/bin/fastnotes + menu
-./install.sh --uninstall
+sudo apt install flatpak plasma-discover-backend-flatpak   # e reinicie a sessão
 ```
+
+**A partir do código** (`git clone`): o mesmo `./install.sh` decide sozinho.
+Com Rust ≥ 1.85 ele compila otimizado para a sua CPU; sem Rust, ou com o Rust
+antigo do apt (1.75, que não compila a edição 2024), ele baixa o binário
+pronto da versão correspondente.
+
+```sh
+./install.sh             # automático
+./install.sh --source    # força compilar (precisa de build-essential, pkg-config, libxkbcommon-dev)
+./install.sh --binary    # força baixar o binário pronto
+./install.sh --uninstall # remove (as notas ficam)
+```
+
+O binário pronto é compilado num Ubuntu 22.04 (glibc 2.35) e só depende de
+`libxkbcommon0`, já presente em qualquer desktop KDE ou GNOME. Fontes: usa a
+Inter incluída e a Noto do sistema onde quer que a distribuição a ponha.
 
 Atalho global no KDE: Configurações do Sistema → Atalhos → Adicionar novo →
 Comando ou script: `fastnotes`.
@@ -418,7 +441,9 @@ captura). O build lê o código pela tag no GitHub e sem rede, por isso
 ```
 
 O script atualiza `Cargo.toml` e o `metainfo.xml`, regenera as fontes do
-cargo, faz commit e tag `vX.Y.Z`, envia ao GitHub, compila o Flatpak com
+cargo, faz commit e tag `vX.Y.Z`, envia ao GitHub, gera o pacote portátil
+num contêiner Ubuntu 22.04 (`packaging/build-portable.sh`, precisa de
+Docker) e o anexa a uma versão do GitHub, compila o Flatpak com
 `org.flatpak.Builder`, assina os commits do ostree (chave `Fast Notes
 Flatpak` no GPG local) e publica o repositório no GitHub Pages. Quem instalou
 pelo Discover recebe a versão nova na próxima verificação de atualizações.
