@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.3.1" date="2026-10-05">
+      <description>
+        <p>Compatível com Kubuntu/Ubuntu: pacote pronto sem compilar, instalador sem Rust, fontes Noto do Ubuntu e aviso claro em sessão X11.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-09-22">
       <description>
         <p>Colunas com largura ajustável pelo mouse; o app recarrega notas alteradas fora dele (base da sincronia com o Telegram).</p>
