@@ -60,7 +60,7 @@ build_deps_ok() {
 }
 
 STAGE=""
-cleanup() { [[ -n "$STAGE" ]] && rm -rf "$STAGE"; }
+cleanup() { if [[ -n "$STAGE" ]]; then rm -rf "$STAGE"; fi; }
 trap cleanup EXIT
 
 # Baixa o pacote pronto da versão (ou o mais recente) do GitHub.
@@ -137,3 +137,4 @@ if [[ "${XDG_SESSION_TYPE:-}" == "x11" ]]; then
   say "⚠ esta sessão é X11 e o Fast Notes precisa de Wayland."
   say "  Saia da sessão e, na tela de login, escolha \"Plasma (Wayland)\"."
 fi
+exit 0
