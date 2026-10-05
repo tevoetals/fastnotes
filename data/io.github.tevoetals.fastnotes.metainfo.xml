@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.3.2" date="2026-10-05">
+      <description>
+        <p>Instalador: sem aviso falso sobre a biblioteca libxkbcommon.</p>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-05">
       <description>
         <p>Compatível com Kubuntu/Ubuntu: pacote pronto sem compilar, instalador sem Rust, fontes Noto do Ubuntu e aviso claro em sessão X11.</p>
