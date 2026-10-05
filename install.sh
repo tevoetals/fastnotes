@@ -36,7 +36,8 @@ fi
 
 # Rust instalado pelo rustup fica em ~/.cargo/bin, que nem sempre está no PATH.
 export PATH="$HOME/.cargo/bin:$PATH"
-VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml 2>/dev/null | head -1)
+VER=""
+[[ -f Cargo.toml ]] && VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 rust_ok() {
   command -v cargo >/dev/null 2>&1 || return 1
