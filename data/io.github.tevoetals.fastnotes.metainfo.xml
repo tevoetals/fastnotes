@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.4.0" date="2026-10-05">
+      <description>
+        <p>Imagens: clique seleciona e o texto sai depois da imagem; arrastar move entre linhas com prévia; qualquer borda redimensiona.</p>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-10-05">
       <description>
         <p>Instalador: sem aviso falso sobre a biblioteca libxkbcommon.</p>
