@@ -18,6 +18,9 @@ APPS="$HOME/.local/share/applications"
 ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 FONTS="${XDG_DATA_HOME:-$HOME/.local/share}/fonts/fastnotes"
 RUST_MIN=1.85
+# Lista das bibliotecas do sistema (lida uma vez; grep -q num pipe com
+# pipefail daria falso negativo).
+LIBS=$(ldconfig -p 2>/dev/null || /sbin/ldconfig -p 2>/dev/null || true)
 MODE="${1:-auto}"
 
 say() { printf '%s\n' "$*"; }
@@ -49,7 +52,7 @@ rust_ok() {
 build_deps_ok() {
   local miss=()
   command -v cc >/dev/null 2>&1 || miss+=("compilador C")
-  { ldconfig -p 2>/dev/null | grep -q 'libxkbcommon.so ' || [[ -e /usr/lib/x86_64-linux-gnu/libxkbcommon.so || -e /usr/lib/libxkbcommon.so || -e /usr/lib64/libxkbcommon.so ]]; } || miss+=("libxkbcommon (dev)")
+  { [[ "$LIBS" == *"libxkbcommon.so "* ]] || [[ -e /usr/lib/x86_64-linux-gnu/libxkbcommon.so || -e /usr/lib/libxkbcommon.so || -e /usr/lib64/libxkbcommon.so ]]; } || miss+=("libxkbcommon (dev)")
   if ((${#miss[@]})); then
     say "faltam para compilar: ${miss[*]}"
     if command -v apt-get >/dev/null 2>&1; then say "  sudo apt install build-essential pkg-config libxkbcommon-dev"
@@ -129,7 +132,7 @@ say "  notas em:  ${FASTNOTES_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fastnote
 say "  atalho global: Configurações do Sistema → Atalhos → Adicionar novo → Comando: fastnotes"
 
 # Avisos sobre o que falta para rodar.
-if ! { ldconfig -p 2>/dev/null | grep -q 'libxkbcommon.so.0'; }; then
+if [[ "$LIBS" != *"libxkbcommon.so.0"* ]]; then
   say "⚠ falta a biblioteca libxkbcommon (teclado). Kubuntu/Ubuntu: sudo apt install libxkbcommon0"
 fi
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) say "⚠ ~/.local/bin não está no PATH deste terminal; o menu funciona, mas para digitar 'fastnotes' faça logout/login." ;; esac
