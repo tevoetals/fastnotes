@@ -662,6 +662,26 @@ fn locale() -> String {
         .unwrap_or_else(|| "en-US".to_string())
 }
 
+/// Sem compositor Wayland (ex.: sessão "Plasma (X11)", padrão no Kubuntu
+/// 24.04): explica no terminal e numa janela do sistema, em vez de travar.
+fn no_wayland() {
+    let x11 = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "x11") || std::env::var_os("DISPLAY").is_some();
+    let msg = if x11 {
+        "O Fast Notes precisa de uma sessão Wayland e esta sessão é X11.\n\n\
+         Saia da sessão e, na tela de login, escolha \"Plasma (Wayland)\" \
+         (no canto inferior esquerdo, antes de digitar a senha)."
+    } else {
+        "O Fast Notes não encontrou um compositor Wayland (WAYLAND_DISPLAY).\n\n\
+         Abra-o de dentro de uma sessão gráfica Wayland, como \"Plasma (Wayland)\"."
+    };
+    eprintln!("fastnotes: {}", msg.replace("\n\n", " "));
+    // Lançado pelo menu não há terminal: mostra uma janela se der.
+    let shown = std::process::Command::new("kdialog").args(["--title", "Fast Notes", "--error", msg]).status().is_ok_and(|s| s.success());
+    if !shown {
+        let _ = std::process::Command::new("notify-send").args(["-a", "Fast Notes", "Fast Notes precisa de Wayland", msg]).status();
+    }
+}
+
 fn file_mtime(p: &Path) -> Option<std::time::SystemTime> {
     std::fs::metadata(p).ok()?.modified().ok()
 }
@@ -740,12 +760,19 @@ fn load_inter(db: &mut fontdb::Database) -> bool {
     ok
 }
 
+/// Pastas onde as distribuições põem a Noto: Arch/Fedora (`noto`), Debian/
+/// Ubuntu/Kubuntu (`truetype/noto`, `opentype/noto`); no Flatpak as fontes
+/// do sistema aparecem em /run/host/fonts.
+const NOTO_DIRS: [&str; 6] = [
+    "/usr/share/fonts/noto",
+    "/usr/share/fonts/truetype/noto",
+    "/usr/share/fonts/opentype/noto",
+    "/run/host/fonts/noto",
+    "/run/host/fonts/truetype/noto",
+    "/run/host/fonts/opentype/noto",
+];
+
 fn curated_db() -> Option<fontdb::Database> {
-    // No Flatpak as fontes do sistema ficam em /run/host/fonts.
-    let dir = ["/usr/share/fonts/noto", "/run/host/fonts/noto"]
-        .into_iter()
-        .map(Path::new)
-        .find(|d| d.join("NotoSans-Regular.ttf").is_file())?;
     let files = [
         "NotoSans-Regular.ttf",
         "NotoSans-Bold.ttf",
@@ -762,7 +789,8 @@ fn curated_db() -> Option<fontdb::Database> {
     load_inter(&mut db);
     let mut loaded = 0;
     for f in files {
-        if db.load_font_file(dir.join(f)).is_ok() {
+        let Some(path) = NOTO_DIRS.iter().map(|d| Path::new(d).join(f)).find(|p| p.is_file()) else { continue };
+        if db.load_font_file(path).is_ok() {
             loaded += 1;
         }
     }
@@ -794,7 +822,12 @@ fn make_font_system(mut db: fontdb::Database) -> FontSystem {
         Some(name) => db.set_sans_serif_family(name),
         None => db.set_sans_serif_family("Noto Sans"),
     }
-    db.set_monospace_family("Noto Sans Mono");
+    // Mono: a Noto, senão a que a distribuição tiver (Hack é a do KDE).
+    let mono = ["Noto Sans Mono", "Hack", "DejaVu Sans Mono", "Liberation Mono", "Ubuntu Mono"]
+        .into_iter()
+        .find(|m| db.faces().any(|f| f.families.iter().any(|(n, _)| n == m)))
+        .unwrap_or("Noto Sans Mono");
+    db.set_monospace_family(mono);
     db.set_serif_family("Noto Serif");
     FontSystem::new_with_locale_and_db(locale(), db)
 }
@@ -2798,7 +2831,13 @@ fn main() {
     // Fontes curadas carregam numa thread enquanto conectamos ao Wayland.
     let font_thread = std::thread::spawn(curated_db);
 
-    let conn = Connection::connect_to_env().expect("não foi possível conectar ao Wayland (WAYLAND_DISPLAY)");
+    let conn = match Connection::connect_to_env() {
+        Ok(c) => c,
+        Err(_) => {
+            no_wayland();
+            std::process::exit(1);
+        }
+    };
     let (globals, event_queue) = registry_queue_init(&conn).expect("registry");
     let qh: QueueHandle<App> = event_queue.handle();
     let mut event_loop: EventLoop<App> = EventLoop::try_new().expect("event loop");
