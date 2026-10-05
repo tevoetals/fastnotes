@@ -879,7 +879,7 @@ struct InlineImg {
     h: u32,
 }
 
-/// Imagem desenhada na tela (para redimensionar pelos cantos).
+/// Imagem desenhada na tela (para selecionar, mover e redimensionar).
 struct ImgHit {
     rect: Rect,
     line: usize,
@@ -887,20 +887,43 @@ struct ImgHit {
     end: usize,
 }
 
-/// Arrasto de canto de imagem em andamento.
+/// Arrasto de borda/canto de imagem em andamento.
 struct ImgDrag {
     line: usize,
     start: usize,
     end: usize,
     w0: i32,
+    h0: i32,
     x0: i32,
-    /// Canto direito (a largura cresce com o mouse indo para a direita).
-    right: bool,
+    y0: i32,
+    /// Borda pega: `sx` -1 esquerda / 1 direita, `sy` -1 topo / 1 fundo (0 = nenhuma).
+    edge: (i8, i8),
+}
+
+/// Imagem sendo arrastada para outra posição; só é gravada ao soltar.
+struct ImgMove {
+    line: usize,
+    start: usize,
+    end: usize,
+    x0: i32,
+    y0: i32,
+    /// Passou do limiar de arraste (antes disso é só um clique).
+    active: bool,
+}
+
+/// Prévia (fantasma) da imagem no ponto onde vai cair.
+struct ImgGhost {
+    path: String,
+    w: u32,
+    target: Cursor,
 }
 
 const IMG_MIN_W: u32 = 24;
-const IMG_CORNER: f32 = 10.0;
+/// Faixa (px lógicos) em volta da borda da imagem que redimensiona.
+const IMG_EDGE: f32 = 5.0;
 const IMG_PAD: f32 = 0.25;
+/// Distância (px lógicos) que o mouse anda antes de virar arraste.
+const DRAG_SLOP: f32 = 4.0;
 
 /// Tabela desenhada no espaço das suas linhas `|`: colunas com largura pelo
 /// conteúdo, números à direita, réguas horizontais suaves.
@@ -1226,6 +1249,10 @@ impl Tab {
                     let pad = (font_px * IMG_PAD).round();
                     let slot = Attrs::new().metrics(Metrics::new(1.0, h as f32 + pad)).letter_spacing(w as f32).color(TRANSPARENT);
                     list.add_span(im.start..im.start + 1, &slot);
+                    // O resto do marcador nunca aparece (nem na linha do cursor):
+                    // a imagem se comporta como um caractere só.
+                    let hidden = Attrs::new().metrics(Metrics::new(1.0, line_h)).letter_spacing(-0.6).color(TRANSPARENT);
+                    list.add_span(im.start + 1..im.end, &hidden);
                     inline_imgs.push(InlineImg { line: i, idx: im.start, start: im.start, end: im.end, path: im.path.clone(), w, h });
                 }
                 bl.set_attrs_list(list);
@@ -1628,6 +1655,11 @@ struct Ui {
     col_hover: Option<(usize, usize)>,
     /// Arraste de um divisor de colunas em andamento.
     col_drag: Option<ColDrag>,
+    /// Imagem selecionada (linha, início do marcador): borda fina, sem cursor de texto.
+    img_sel: Option<(usize, usize)>,
+    /// Imagem sob o mouse (mesma chave).
+    img_hover: Option<(usize, usize)>,
+    img_ghost: Option<ImgGhost>,
     traced: bool,
     prof: Option<Prof>,
     labels: Vec<(LabelKey, Buffer)>,
@@ -2015,7 +2047,7 @@ impl Ui {
         let mut img_hits = Vec::new();
         let div_active = self.col_div_active();
         {
-            let Ui { font_system, swash, tabs, active, traced, images, prof, .. } = self;
+            let Ui { font_system, swash, tabs, active, traced, images, prof, img_sel, img_hover, img_ghost, .. } = self;
             let traced_flag = traced;
             let tab = &mut tabs[*active];
             if tab.metrics_key != (zoom, scale) {
@@ -2208,20 +2240,72 @@ impl Ui {
                 }
                 v
             });
+            let mut sel_shown = false;
             for (k, x, y, _) in placements {
                 let im = &tab.inline_imgs[k];
                 if let Some(bm) = images.scaled(&im.path, im.w) {
-                    canvas.blit(ox + x, oy + y, bm.w, bm.h, &bm.rgba);
-                    img_hits.push(ImgHit { rect: Rect::new(ox + x, oy + y, bm.w as i32, bm.h as i32), line: im.line, start: im.start, end: im.end });
+                    let rect = Rect::new(ox + x, oy + y, bm.w as i32, bm.h as i32);
+                    canvas.blit(rect.x, rect.y, bm.w, bm.h, &bm.rgba);
+                    // Borda fina: branca na selecionada, apagada sob o mouse.
+                    let key = Some((im.line, im.start));
+                    let border = if *img_sel == key {
+                        sel_shown = true;
+                        Some(WHITE)
+                    } else if *img_hover == key {
+                        Some(DIM2)
+                    } else {
+                        None
+                    };
+                    if let Some(c) = border {
+                        let t = (scale).max(1);
+                        canvas.rect(rect.x - t, rect.y - t, rect.w + 2 * t, t, c);
+                        canvas.rect(rect.x - t, rect.bottom(), rect.w + 2 * t, t, c);
+                        canvas.rect(rect.x - t, rect.y, t, rect.h, c);
+                        canvas.rect(rect.right(), rect.y, t, rect.h, c);
+                    }
+                    img_hits.push(ImgHit { rect, line: im.line, start: im.start, end: im.end });
                 }
             }
-            if focused && !in_column && !in_table {
+            if !sel_shown {
+                *img_sel = None;
+            }
+            // Prévia da imagem sendo arrastada: 50 % de opacidade e menos saturada,
+            // no ponto onde ela cairia.
+            if let Some(g) = img_ghost.as_ref() {
+                let spot = tab.editor.with_buffer(|b| {
+                    let run = b.layout_runs().filter(|r| r.line_i == g.target.line).find(|r| {
+                        r.glyphs.last().is_none_or(|l| g.target.index <= l.end)
+                    }).or_else(|| b.layout_runs().filter(|r| r.line_i == g.target.line).last())?;
+                    let x = run
+                        .glyphs
+                        .iter()
+                        .find(|gl| gl.start >= g.target.index)
+                        .map(|gl| gl.x)
+                        .or_else(|| run.glyphs.last().map(|gl| gl.x + gl.w))
+                        .unwrap_or(0.0);
+                    Some((x.round() as i32, run.line_top as i32))
+                });
+                if let (Some((x, y)), Some(bm)) = (spot, images.scaled(&g.path, g.w)) {
+                    let dy = tab.line_shift.get(g.target.line).copied().unwrap_or(0);
+                    canvas.blit_ghost(ox + x, oy + y + dy, bm.w, bm.h, &bm.rgba);
+                    canvas.rect(ox + x - cursor_w, oy + y + dy, cursor_w, bm.h as i32, DIM);
+                }
+            }
+            if focused && !in_column && !in_table && !sel_shown {
                 if let Some((cx, cy)) = tab.editor.cursor_position() {
                     let lh = tab.editor.with_buffer(|b| {
                         b.layout_runs().find(|r| r.line_i == tab.editor.cursor().line).map(|r| r.line_height as i32)
                     });
                     let dy = tab.line_shift.get(cursor.line).copied().unwrap_or(0);
-                    canvas.rect(ox + cx, oy + cy + dy, cursor_w, lh.unwrap_or(line_height), WHITE);
+                    let mut lh = lh.unwrap_or(line_height);
+                    let mut cy = cy + dy;
+                    // Ao lado de uma imagem a linha é alta: o cursor fica do
+                    // tamanho do texto, centrado como o texto.
+                    if lh > line_height && tab.inline_imgs.iter().any(|im| im.line == cursor.line) {
+                        cy += (lh - line_height) / 2;
+                        lh = line_height;
+                    }
+                    canvas.rect(ox + cx, oy + cy, cursor_w, lh, WHITE);
                 }
             }
             canvas.reset_clip();
@@ -2807,6 +2891,7 @@ struct App {
     pointer_pos: (f64, f64),
     pointer_down: bool,
     img_drag: Option<ImgDrag>,
+    img_move: Option<ImgMove>,
     last_click: (Instant, (f64, f64), u32),
     compose: Option<xkb::compose::State>,
     blink_token: Option<RegistrationToken>,
@@ -2899,6 +2984,9 @@ fn main() {
         hover: (-1, -1),
         hits: Hits::default(),
         col_hover: None,
+        img_sel: None,
+        img_hover: None,
+        img_ghost: None,
         col_drag: None,
         traced: false,
         prof: Prof::new(),
@@ -2970,6 +3058,7 @@ fn main() {
         pointer_pos: (0.0, 0.0),
         pointer_down: false,
         img_drag: None,
+        img_move: None,
         last_click: (Instant::now() - Duration::from_secs(10), (0.0, 0.0), 0),
         compose,
         blink_token: None,
@@ -3429,6 +3518,8 @@ impl App {
             _ => tab.editor.cursor() > before,
         };
         self.settle_cursor(before, forward, horizontal);
+        let forward = self.ui.tab().editor.cursor() > before || (forward && !horizontal);
+        self.snap_out_of_image(forward);
         if shift {
             self.update_primary();
         }
@@ -3710,6 +3801,12 @@ impl App {
         let tab = self.ui.tab();
         let cur = tab.editor.cursor();
         if tab.editor.selection() == Selection::None {
+            // Logo depois de uma imagem: ela some inteira.
+            if let Some(im) = tab.inline_imgs.iter().find(|im| im.line == cur.line && im.end == cur.index) {
+                let (start, end) = (im.start, im.end);
+                self.delete_image(cur.line, start, end);
+                return;
+            }
             if self.is_space_line(cur.line) {
                 self.delete_whole_line(cur.line);
                 return;
@@ -3747,6 +3844,12 @@ impl App {
         let tab = self.ui.tab();
         let cur = tab.editor.cursor();
         if tab.editor.selection() == Selection::None {
+            // Logo antes de uma imagem: ela some inteira.
+            if let Some(im) = tab.inline_imgs.iter().find(|im| im.line == cur.line && im.start == cur.index) {
+                let (start, end) = (im.start, im.end);
+                self.delete_image(cur.line, start, end);
+                return;
+            }
             if self.is_space_line(cur.line) {
                 self.delete_whole_line(cur.line);
                 return;
@@ -4687,22 +4790,190 @@ impl App {
         self.insert_text(&format!("![]({rel})"));
     }
 
-    // ---------- redimensionar imagem pelos cantos ----------
+    // ---------- imagens: selecionar, mover, redimensionar ----------
 
-    /// Canto de imagem sob o mouse: (índice do hit, canto direito?).
-    fn image_corner_at(&self, px: i32, py: i32) -> Option<(usize, bool)> {
-        let r = self.ui.px(IMG_CORNER);
+    /// Borda de imagem sob o mouse: (índice do hit, (sx, sy)). Qualquer lado
+    /// redimensiona; nos cantos valem os dois eixos.
+    fn image_edge_at(&self, px: i32, py: i32) -> Option<(usize, (i8, i8))> {
+        let r = self.ui.px(IMG_EDGE).max(2);
         self.ui.hits.images.iter().enumerate().find_map(|(i, h)| {
-            let near = |x: i32, y: i32| (px - x).abs() <= r && (py - y).abs() <= r;
             let (l, rt, t, b) = (h.rect.x, h.rect.right(), h.rect.y, h.rect.bottom());
-            if near(rt, t) || near(rt, b) {
-                Some((i, true))
-            } else if near(l, t) || near(l, b) {
-                Some((i, false))
-            } else {
-                None
+            if px < l - r || px > rt + r || py < t - r || py > b + r {
+                return None;
             }
+            // Imagens pequenas: a faixa nunca come mais de um terço do lado.
+            let rx = r.min(h.rect.w / 3).max(1);
+            let ry = r.min(h.rect.h / 3).max(1);
+            let sx = if px <= l + rx { -1 } else if px >= rt - rx { 1 } else { 0 };
+            let sy = if py <= t + ry { -1 } else if py >= b - ry { 1 } else { 0 };
+            (sx != 0 || sy != 0).then_some((i, (sx, sy)))
         })
+    }
+
+    /// Miolo da imagem sob o mouse (fora das bordas): clique seleciona, arraste move.
+    fn image_body_at(&self, px: i32, py: i32) -> Option<usize> {
+        if self.image_edge_at(px, py).is_some() {
+            return None;
+        }
+        self.ui.hits.images.iter().position(|h| h.rect.contains(px, py))
+    }
+
+    fn edge_icon(edge: (i8, i8)) -> CursorIcon {
+        match edge {
+            (0, _) => CursorIcon::NsResize,
+            (_, 0) => CursorIcon::EwResize,
+            (sx, sy) if sx == sy => CursorIcon::NwseResize,
+            _ => CursorIcon::NeswResize,
+        }
+    }
+
+    /// Imagem (carregada) cujo marcador contém `c` por dentro: (início, fim).
+    fn image_around(&self, c: Cursor) -> Option<(usize, usize)> {
+        self.ui
+            .tab()
+            .inline_imgs
+            .iter()
+            .find(|im| im.line == c.line && c.index > im.start && c.index < im.end)
+            .map(|im| (im.start, im.end))
+    }
+
+    /// O marcador da imagem é um caractere só: o cursor nunca fica dentro dele.
+    fn snap_out_of_image(&mut self, forward: bool) {
+        let c = self.ui.tab().editor.cursor();
+        if let Some((start, end)) = self.image_around(c) {
+            let idx = if forward { end } else { start };
+            self.ui.tab_mut().editor.set_cursor(Cursor::new(c.line, idx));
+        }
+    }
+
+    /// Clique no miolo da imagem: seleciona e põe o cursor logo depois dela.
+    fn select_image(&mut self, line: usize, start: usize, end: usize) {
+        let tab = self.ui.tab_mut();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.set_cursor(Cursor::new(line, end));
+        self.ui.img_sel = Some((line, start));
+        self.wake_cursor();
+        self.after_input();
+        self.request_redraw();
+    }
+
+    /// Apaga a imagem inteira (marcador) e deixa o cursor no lugar dela.
+    fn delete_image(&mut self, line: usize, start: usize, end: usize) {
+        self.ui.img_sel = None;
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        tab.editor.delete_range(Cursor::new(line, start), Cursor::new(line, end));
+        let change = tab.editor.finish_change();
+        tab.editor.set_cursor(Cursor::new(line, start));
+        self.after_change(change, true);
+    }
+
+    /// Linha que pode receber uma imagem arrastada (texto comum, fora de
+    /// colunas, tabelas, código e dobras).
+    fn droppable(&self, line: usize) -> bool {
+        self.ui.tab().lines.get(line).is_some_and(|l| {
+            l.col.is_none()
+                && !l.folded
+                && !l.skip_cursor()
+                && !matches!(l.block, Block::Table | Block::TableSep | Block::ColStart | Block::ColSep | Block::ColEnd | Block::Fence | Block::Code | Block::Space)
+        })
+    }
+
+    /// Arraste do miolo: depois do limiar, calcula onde a imagem cairia e
+    /// mostra a prévia ali. Nada muda no texto até soltar.
+    fn image_move_motion(&mut self, px: i32, py: i32) {
+        let Some(mv) = &self.img_move else { return };
+        let slop = self.ui.px(DRAG_SLOP);
+        if !mv.active && (px - mv.x0).abs() <= slop && (py - mv.y0).abs() <= slop {
+            return;
+        }
+        let (line, start, end) = (mv.line, mv.start, mv.end);
+        if let Some(mv) = self.img_move.as_mut() {
+            mv.active = true;
+        }
+        self.set_cursor_icon(CursorIcon::Grabbing);
+        let (x, y) = self.editor_coords(px, py);
+        let hit = self.ui.tab().editor.with_buffer(|b| b.hit(x as f32, y as f32));
+        let target = hit.filter(|c| self.droppable(c.line)).map(|c| {
+            // Nunca dentro de outra imagem: cai logo depois dela.
+            match self.image_around(c) {
+                Some((_, e)) => Cursor::new(c.line, e),
+                None => c,
+            }
+        });
+        // Soltar na própria posição não faz nada.
+        let target = target.filter(|c| !(c.line == line && c.index >= start && c.index <= end));
+        let im = self.ui.tab().inline_imgs.iter().find(|im| im.line == line && im.start == start).map(|im| (im.path.clone(), im.w));
+        self.ui.img_ghost = match (target, im) {
+            (Some(target), Some((path, w))) => Some(ImgGhost { path, w, target }),
+            _ => None,
+        };
+        self.request_redraw();
+    }
+
+    /// Solta a imagem arrastada: move o marcador para o ponto da prévia
+    /// (um passo de desfazer). A linha de origem some se ficar vazia.
+    fn image_move_drop(&mut self) {
+        let Some(mv) = self.img_move.take() else { return };
+        let Some(ghost) = self.ui.img_ghost.take() else {
+            self.request_redraw();
+            return;
+        };
+        if !mv.active {
+            return;
+        }
+        let (line, start, end, to) = (mv.line, mv.start, mv.end, ghost.target);
+        let markup = self.ui.tab().line_text(line).get(start..end).map(str::to_string);
+        let Some(markup) = markup else { return };
+        let len = markup.len();
+        let remove_line = |tab: &mut Tab, l: usize| {
+            // Linha que só tinha a imagem: some inteira.
+            if !tab.line_text(l).trim().is_empty() {
+                return false;
+            }
+            let n = tab.editor.with_buffer(|b| b.lines.len());
+            if l + 1 < n {
+                tab.editor.delete_range(Cursor::new(l, 0), Cursor::new(l + 1, 0));
+            } else if l > 0 {
+                let prev = tab.line_text(l - 1).len();
+                tab.editor.delete_range(Cursor::new(l - 1, prev), Cursor::new(l, tab.line_text(l).len()));
+            } else {
+                return false;
+            }
+            true
+        };
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        let later = to.line > line || (to.line == line && to.index >= end);
+        let new_pos;
+        if later {
+            // Insere primeiro (as posições de origem não mudam), depois remove.
+            tab.editor.insert_at(to, &markup, None);
+            tab.editor.delete_range(Cursor::new(line, start), Cursor::new(line, end));
+            let mut at = to;
+            if to.line == line {
+                at.index -= len;
+            } else if remove_line(tab, line) {
+                at.line -= 1;
+            }
+            new_pos = at;
+        } else {
+            // Remove primeiro (o destino vem antes e não se desloca).
+            tab.editor.delete_range(Cursor::new(line, start), Cursor::new(line, end));
+            if to.line != line {
+                remove_line(tab, line);
+            }
+            tab.editor.insert_at(to, &markup, None);
+            new_pos = to;
+        }
+        let change = tab.editor.finish_change();
+        tab.editor.set_cursor(Cursor::new(new_pos.line, new_pos.index + len));
+        self.after_change(change, true);
+        self.ui.img_sel = Some((new_pos.line, new_pos.index));
+        self.after_input();
+        self.request_redraw();
     }
 
     /// Reescreve o marcador `![alt](caminho =Wx)` da imagem com a largura nova.
@@ -4773,10 +5044,17 @@ impl App {
         self.request_redraw();
     }
 
-    fn image_drag_motion(&mut self, px: i32) {
+    fn image_drag_motion(&mut self, px: i32, py: i32) {
         let Some(d) = &self.img_drag else { return };
-        let dx = px - d.x0;
-        let target = if d.right { d.w0 + dx } else { d.w0 - dx };
+        let (sx, sy) = (d.edge.0 as i32, d.edge.1 as i32);
+        // Lados e cantos mudam a largura pelo eixo x; topo e fundo, pela
+        // altura (a proporção da imagem é mantida).
+        let target = if sx != 0 {
+            d.w0 + sx * (px - d.x0)
+        } else {
+            let h = d.h0 + sy * (py - d.y0);
+            (h as i64 * d.w0 as i64 / d.h0.max(1) as i64) as i32
+        };
         let max_w = self.ui.tab().wide_w.max(IMG_MIN_W as f32) as i32;
         let w = target.clamp(IMG_MIN_W as i32, max_w) as u32;
         let cur_w = self.ui.tab().inline_imgs.iter().find(|im| im.line == d.line && im.start == d.start).map(|im| im.w);
@@ -4889,6 +5167,21 @@ impl App {
                 }
             }
             return;
+        }
+
+        if !sym.is_modifier_key() {
+            if let Some((line, start)) = self.ui.img_sel.take() {
+                self.request_redraw();
+                let im = self.ui.tab().inline_imgs.iter().find(|im| im.line == line && im.start == start).map(|im| im.end);
+                match (sym, im) {
+                    (Keysym::Escape, _) => return,
+                    (Keysym::BackSpace | Keysym::Delete | Keysym::KP_Delete, Some(end)) if !(m.ctrl || m.alt) => {
+                        self.delete_image(line, start, end);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         if m.ctrl && m.shift && !m.alt {
@@ -5178,7 +5471,12 @@ impl App {
         }
         if self.img_drag.is_some() {
             self.ui.hover = (px, py);
-            self.image_drag_motion(px);
+            self.image_drag_motion(px, py);
+            return;
+        }
+        if self.img_move.is_some() {
+            self.ui.hover = (px, py);
+            self.image_move_motion(px, py);
             return;
         }
         if self.ui.col_drag.is_some() {
@@ -5200,13 +5498,22 @@ impl App {
             self.set_cursor_icon(CursorIcon::EwResize);
             return;
         }
-        let corner = if self.ui.list_open { None } else { self.image_corner_at(px, py) };
+        let free = !self.ui.list_open && !self.pointer_down;
+        let edge = if free { self.image_edge_at(px, py) } else { None };
+        let body = if free && edge.is_none() { self.image_body_at(px, py) } else { None };
+        let hover = edge.map(|(i, _)| i).or(body).and_then(|i| self.ui.hits.images.get(i)).map(|h| (h.line, h.start));
+        if hover != self.ui.img_hover {
+            self.ui.img_hover = hover;
+            self.request_redraw();
+        }
         let rects = self.clickable_rects();
         let over_button = rects.iter().any(|r| r.contains(px, py));
         let h = &self.ui.hits;
         let over_editor = h.editor.contains(px, py) && !(self.ui.list_open && h.panel.contains(px, py));
-        let icon = if let Some((_, right)) = corner {
-            if right { CursorIcon::NwseResize } else { CursorIcon::NeswResize }
+        let icon = if let Some((_, e)) = edge {
+            Self::edge_icon(e)
+        } else if body.is_some() {
+            CursorIcon::Grab
         } else if over_button {
             CursorIcon::Pointer
         } else if over_editor {
@@ -5228,7 +5535,10 @@ impl App {
             } else {
                 let (x, y) = self.editor_coords(px, py);
                 let (fs, tab) = self.ui.ed();
+                let before = tab.editor.cursor();
                 tab.editor.action(fs, Action::Drag { x, y });
+                let forward = self.ui.tab().editor.cursor() > before;
+                self.snap_out_of_image(forward);
             }
             self.request_redraw();
         } else if rects.iter().any(|r| r.contains(was.0, was.1) != r.contains(px, py)) {
@@ -5387,13 +5697,26 @@ impl App {
                 self.request_redraw();
                 return;
             }
-            if let Some((i, right)) = self.image_corner_at(px, py) {
+            if let Some((i, edge)) = self.image_edge_at(px, py) {
                 let h = &self.ui.hits.images[i];
-                self.img_drag = Some(ImgDrag { line: h.line, start: h.start, end: h.end, w0: h.rect.w, x0: px, right });
+                let (line, start, end) = (h.line, h.start, h.end);
+                self.img_drag = Some(ImgDrag { line, start, end, w0: h.rect.w, h0: h.rect.h, x0: px, y0: py, edge });
+                self.select_image(line, start, end);
                 self.ui.tab_mut().undo.hold();
-                self.set_cursor_icon(if right { CursorIcon::NwseResize } else { CursorIcon::NeswResize });
+                self.set_cursor_icon(Self::edge_icon(edge));
                 return;
             }
+            if let Some(i) = self.image_body_at(px, py) {
+                let h = &self.ui.hits.images[i];
+                let (line, start, end) = (h.line, h.start, h.end);
+                self.select_image(line, start, end);
+                self.img_move = Some(ImgMove { line, start, end, x0: px, y0: py, active: false });
+                self.set_cursor_icon(CursorIcon::Grab);
+                return;
+            }
+        }
+        if button == BTN_LEFT {
+            self.ui.img_sel = None;
         }
         if button == BTN_LEFT {
             if let Some(c) = self.cell_hit(px, py).or_else(|| self.column_hit(px, py)) {
@@ -5435,6 +5758,7 @@ impl App {
                     let before = tab.editor.cursor();
                     tab.editor.action(fs, action);
                     self.settle_cursor(before, true, false);
+                    self.snap_out_of_image(true);
                     self.pointer_down = true;
                     self.wake_cursor();
                     self.request_redraw();
@@ -5461,6 +5785,11 @@ impl App {
         }
         if button == BTN_LEFT && self.img_drag.take().is_some() {
             self.ui.tab_mut().undo.release();
+            self.on_pointer_motion();
+            return;
+        }
+        if button == BTN_LEFT && self.img_move.is_some() {
+            self.image_move_drop();
             self.on_pointer_motion();
             return;
         }

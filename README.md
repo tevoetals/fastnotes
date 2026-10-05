@@ -195,13 +195,21 @@ Tabelas dentro de colunas aparecem sem a grade.
 - A sintaxe é a de Markdown, `![alt](images/nome.webp)`, e pode aparecer
   várias vezes na mesma linha: texto, imagem, texto, imagem. O texto fica
   centrado verticalmente ao lado da imagem.
-- **Redimensionar com o mouse:** passe o mouse num canto da imagem (o cursor
-  vira seta diagonal) e arraste; para fora aumenta, para dentro diminui, até a
+- **Selecionar:** clique na imagem. Ela ganha uma borda fina e o que você
+  digitar sai logo depois dela; Backspace ou Delete apagam a imagem inteira.
+  Para o cursor a imagem é um caractere só: as setas passam por cima dela.
+- **Mover:** clique no miolo da imagem e arraste para outra linha (ou outro
+  ponto da mesma linha). Enquanto o botão está apertado aparece uma prévia
+  semitransparente e sem cor no destino; o texto só muda ao soltar, e Ctrl+Z
+  desfaz o movimento num passo. Se a linha de origem ficar vazia, ela some.
+- **Redimensionar:** qualquer borda (lados, topo, fundo ou cantos) muda o
+  cursor para a seta de ajuste; arraste para aumentar ou diminuir, até a
   largura da janela ou o mínimo de 24 px, mantendo a proporção. A largura é
   gravada no arquivo como `![alt](caminho =300x)` (extensão usada por vários
   editores Markdown); sem `=Wx`, a imagem usa o tamanho natural limitado à
   largura disponível.
-- O marcador só aparece, apagado, na linha do cursor; PNG, JPEG e WebP são
+- O marcador fica sempre escondido quando a imagem existe; se o arquivo
+  faltar, ele aparece para você corrigir o caminho. PNG, JPEG e WebP são
   decodificados em Rust puro. `/imagem` insere um marcador vazio para você
   preencher o caminho.
 
