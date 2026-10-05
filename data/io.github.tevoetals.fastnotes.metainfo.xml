@@ -47,6 +47,11 @@
   <releases>
     <release version="0.4.0" date="2026-10-05">
       <description>
+        <p>Imagens: clique seleciona e o texto digitado sai depois da imagem; arrastar move a imagem entre linhas com prévia; qualquer borda redimensiona.</p>
+      </description>
+    </release>
+    <release version="0.4.0" date="2026-10-05">
+      <description>
         <p>Imagens: clique seleciona e o texto sai depois da imagem; arrastar move entre linhas com prévia; qualquer borda redimensiona.</p>
       </description>
     </release>
