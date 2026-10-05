@@ -866,17 +866,51 @@ struct Tab {
     line_shift: Vec<i32>,
     /// Imagens em linha do buffer principal, já com tamanho na tela.
     inline_imgs: Vec<InlineImg>,
+    /// Linhas com imagem, desenhadas como faixas de trechos.
+    img_rows: Vec<ImgRow>,
 }
 
 /// Imagem em linha pronta para desenhar: posição do glifo reservado e tamanho.
 struct InlineImg {
     line: usize,
-    idx: usize,
     start: usize,
     end: usize,
     path: String,
     w: u32,
-    h: u32,
+}
+
+/// Linha com imagem desenhada como faixa: texto | imagem | texto. A imagem
+/// age como uma coluna: cada trecho de texto quebra dentro da própria largura,
+/// ao lado dela (sem pular para cima ou para baixo da imagem).
+struct ImgRow {
+    line: usize,
+    h: f32,
+    w: f32,
+    segs: Vec<ImgSeg>,
+    /// (índice em `inline_imgs`, x, y) de cada imagem da linha.
+    imgs: Vec<(usize, f32, f32)>,
+}
+
+/// Trecho de texto entre imagens (intervalo de bytes da linha crua).
+struct ImgSeg {
+    start: usize,
+    end: usize,
+    x: f32,
+    y: f32,
+    /// Até onde (x) um clique ainda cai neste trecho.
+    hit_end: f32,
+    buffer: Buffer,
+}
+
+/// Trecho clicável de uma faixa de imagem.
+struct SegHit {
+    rect: Rect,
+    line: usize,
+    start: usize,
+    ri: usize,
+    si: usize,
+    tx: i32,
+    ty: i32,
 }
 
 /// Imagem desenhada na tela (para selecionar, mover e redimensionar).
@@ -1098,6 +1132,7 @@ impl Tab {
             tables: Vec::new(),
             line_shift: Vec::new(),
             inline_imgs: Vec::new(),
+            img_rows: Vec::new(),
         }
     }
 
@@ -1170,10 +1205,9 @@ impl Tab {
         self.build_columns(fs, font_px, cursor_line);
         let cursor = self.editor.cursor();
         self.build_tables(fs, font_px, cursor);
+        self.build_img_rows(fs, images, font_px, cursor_line, &texts);
+        let row_h: Vec<(usize, f32)> = self.img_rows.iter().map(|r| (r.line, r.h)).collect();
         let lines = &self.lines;
-        let text_w = self.editor_size.0;
-        let wide_w = self.wide_w.max(text_w);
-        let mut inline_imgs: Vec<InlineImg> = Vec::new();
         self.editor.with_buffer_mut(|b| {
             for (i, info) in lines.iter().enumerate() {
                 let Some(bl) = b.lines.get_mut(i) else { break };
@@ -1215,6 +1249,12 @@ impl Tab {
                     bl.set_attrs_list(AttrsList::new(&tiny));
                     continue;
                 }
+                if let Some(&(_, h)) = row_h.iter().find(|(l, _)| *l == i) {
+                    // Linha com imagem: a crua fica invisível com a altura da faixa.
+                    let tiny = Attrs::new().metrics(Metrics::new(1.0, h)).color(TRANSPARENT);
+                    bl.set_attrs_list(AttrsList::new(&tiny));
+                    continue;
+                }
                 if info.block == Block::ColStart {
                     // A linha `:::` ocupa a altura do bloco de colunas (menos as linhas de 1 px).
                     let h = self.columns.iter().find(|b| b.start == i).map(|b| b.height).unwrap_or(1.0);
@@ -1239,26 +1279,163 @@ impl Tab {
                 for (r, f) in spans {
                     list.add_span(r.clone(), &attrs_for(base.clone(), *f, i == cursor_line || img_missing, line_h));
                 }
-                // Imagens em linha: o `!` vira um glifo invisível de 1 px cuja
-                // altura de linha é a da imagem e cujo avanço é a largura dela.
-                let max_w = if wide_w > 0.0 { wide_w as u32 } else { 800 };
-                for im in &info.images {
-                    let Some(bm) = images.get(&im.path) else { continue };
-                    let w = im.width.unwrap_or(bm.w.min(max_w)).clamp(IMG_MIN_W, max_w.max(IMG_MIN_W));
-                    let h = (bm.h as u64 * w as u64 / bm.w.max(1) as u64).max(1) as u32;
-                    let pad = (font_px * IMG_PAD).round();
-                    let slot = Attrs::new().metrics(Metrics::new(1.0, h as f32 + pad)).letter_spacing(w as f32).color(TRANSPARENT);
-                    list.add_span(im.start..im.start + 1, &slot);
-                    // O resto do marcador nunca aparece (nem na linha do cursor):
-                    // a imagem se comporta como um caractere só.
-                    let hidden = Attrs::new().metrics(Metrics::new(1.0, line_h)).letter_spacing(-0.6).color(TRANSPARENT);
-                    list.add_span(im.start + 1..im.end, &hidden);
-                    inline_imgs.push(InlineImg { line: i, idx: im.start, start: im.start, end: im.end, path: im.path.clone(), w, h });
-                }
                 bl.set_attrs_list(list);
             }
         });
-        self.inline_imgs = inline_imgs;
+    }
+
+    /// Trecho `a..b` da linha `info` como buffer próprio (estilos do Markdown).
+    #[allow(clippy::too_many_arguments)]
+    fn seg_buffer(fs: &mut FontSystem, text: &str, info: &md::LineInfo, a: usize, b: usize, editing: bool, font_px: f32, width: Option<f32>) -> Buffer {
+        let (base, line_h) = Self::line_base(info, font_px);
+        let mut pieces: Vec<(&str, Attrs<'static>)> = Vec::new();
+        let mut pos = a;
+        for (r, f) in &info.spans {
+            let (rs, re) = (r.start.max(a), r.end.min(b));
+            if rs >= re {
+                continue;
+            }
+            if rs > pos {
+                pieces.push((&text[pos..rs], base.clone()));
+            }
+            pieces.push((&text[rs..re], attrs_for(base.clone(), *f, editing, line_h)));
+            pos = re;
+        }
+        if pos < b {
+            pieces.push((&text[pos..b], base.clone()));
+        }
+        let mut buffer = Buffer::new(fs, Metrics::new(font_px, body_lh(font_px)));
+        buffer.set_wrap(Wrap::WordOrGlyph);
+        buffer.set_tab_width(4);
+        buffer.set_size(width, None);
+        buffer.set_rich_text(pieces.iter().map(|(t, a)| (*t, a.clone())), &base, Shaping::Advanced, None);
+        buffer.shape_until_scroll(fs, false);
+        buffer
+    }
+
+    /// Linhas com imagens: mede cada imagem e monta a faixa texto | imagem | texto.
+    /// Os trechos ficam com a largura natural quando cabem; senão dividem o
+    /// espaço livre (os curtos primeiro) e quebram dentro dele.
+    fn build_img_rows(&mut self, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32, cursor_line: usize, texts: &[String]) {
+        self.inline_imgs.clear();
+        self.img_rows.clear();
+        let text_w = if self.editor_size.0 > 0.0 { self.editor_size.0 } else { 600.0 };
+        let wide_w = self.wide_w.max(text_w);
+        let max_w = wide_w as u32;
+        let gap = (font_px * 0.375).round();
+        let pad = (font_px * IMG_PAD).round();
+        let min_seg = (font_px * 4.0).round();
+        let lh = body_lh(font_px);
+        for (i, info) in self.lines.iter().enumerate() {
+            if info.images.is_empty()
+                || info.folded
+                || info.col.is_some()
+                || matches!(info.block, Block::Table | Block::TableSep | Block::ColStart | Block::ColSep | Block::ColEnd | Block::Fence | Block::Code)
+            {
+                continue;
+            }
+            // Alguma imagem faltando: a linha fica como texto cru (para corrigir o caminho).
+            let sizes: Option<Vec<(u32, u32)>> = info
+                .images
+                .iter()
+                .map(|im| {
+                    images.get(&im.path).map(|bm| {
+                        let w = im.width.unwrap_or(bm.w.min(max_w)).clamp(IMG_MIN_W, max_w.max(IMG_MIN_W));
+                        (w, (bm.h as u64 * w as u64 / bm.w.max(1) as u64).max(1) as u32)
+                    })
+                })
+                .collect();
+            let Some(sizes) = sizes else { continue };
+            let text = &texts[i];
+            let mut ranges = Vec::new();
+            let mut prev = 0;
+            for im in &info.images {
+                ranges.push((prev, im.start));
+                prev = im.end;
+            }
+            ranges.push((prev, text.len()));
+            let n = ranges.len();
+            let editing = i == cursor_line;
+            let mut bufs: Vec<Buffer> = ranges.iter().map(|&(a, b)| Self::seg_buffer(fs, text, info, a, b, editing, font_px, None)).collect();
+            let full: Vec<bool> = ranges.iter().map(|&(a, b)| b > a).collect();
+            let nat: Vec<f32> = bufs.iter().map(|b| b.layout_runs().map(|r| r.line_w).fold(0.0, f32::max).ceil() + 2.0).collect();
+            let img_total: f32 = sizes.iter().map(|s| s.0 as f32).sum();
+            // Margem entre texto e imagem, a não ser que o texto já tenha um espaço ali.
+            let gap_l: Vec<f32> = ranges.iter().enumerate().map(|(k, &(a, b))| if k > 0 && b > a && !text[a..b].starts_with(char::is_whitespace) { gap } else { 0.0 }).collect();
+            let gap_r: Vec<f32> = ranges.iter().enumerate().map(|(k, &(a, b))| if k + 1 < n && b > a && !text[a..b].ends_with(char::is_whitespace) { gap } else { 0.0 }).collect();
+            let gaps: f32 = gap_l.iter().chain(&gap_r).sum();
+            let nfull = full.iter().filter(|&&f| f).count() as f32;
+            let row_w = text_w.max(img_total + gaps + min_seg * nfull).min(wide_w);
+            let mut free = (row_w - img_total - gaps).max(0.0);
+            let mut widths = vec![0.0f32; n];
+            let mut order: Vec<usize> = (0..n).filter(|&k| full[k]).collect();
+            order.sort_by(|&x, &y| nat[x].total_cmp(&nat[y]));
+            let mut left = order.len();
+            for &k in &order {
+                let share = free / left as f32;
+                let w = nat[k].min(share.max(min_seg.min(nat[k])));
+                widths[k] = w.floor();
+                free = (free - widths[k]).max(0.0);
+                left -= 1;
+            }
+            let mut xs = vec![0.0f32; n];
+            let mut img_x = Vec::new();
+            let mut x = 0.0;
+            for k in 0..n {
+                if k > 0 {
+                    img_x.push(x);
+                    x += sizes[k - 1].0 as f32 + gap_l[k];
+                }
+                xs[k] = x;
+                x += widths[k] + gap_r[k];
+            }
+            let mut seg_h = Vec::new();
+            for (k, b) in bufs.iter_mut().enumerate() {
+                if full[k] {
+                    b.set_size(Some(widths[k].max(1.0)), None);
+                    b.shape_until_scroll(fs, false);
+                }
+                seg_h.push(b.layout_runs().last().map(|r| r.line_top + r.line_height).unwrap_or(lh));
+            }
+            let img_h = sizes.iter().map(|s| s.1).max().unwrap_or(0) as f32;
+            let h = (img_h + pad).max(seg_h.iter().cloned().fold(0.0, f32::max)).round();
+            let mut segs = Vec::new();
+            for (k, buffer) in bufs.into_iter().enumerate() {
+                let hit_end = if k + 1 < n { img_x[k] } else { wide_w.max(row_w) };
+                segs.push(ImgSeg { start: ranges[k].0, end: ranges[k].1, x: xs[k], y: ((h - seg_h[k]) / 2.0).round(), hit_end, buffer });
+            }
+            let mut imgs = Vec::new();
+            for (j, im) in info.images.iter().enumerate() {
+                let (w, ih) = sizes[j];
+                imgs.push((self.inline_imgs.len(), img_x[j], ((h - ih as f32) / 2.0).round()));
+                self.inline_imgs.push(InlineImg { line: i, start: im.start, end: im.end, path: im.path.clone(), w });
+            }
+            self.img_rows.push(ImgRow { line: i, h, w: row_w, segs, imgs });
+        }
+    }
+
+    /// Posição do cursor `c` (x, topo, altura) nas coordenadas do texto,
+    /// valendo também para as faixas de imagem.
+    fn caret_xy(&self, c: Cursor) -> Option<(f32, f32, f32)> {
+        let top = |line: usize| self.editor.with_buffer(|b| b.layout_runs().find(|r| r.line_i == line).map(|r| r.line_top));
+        if let Some(row) = self.img_rows.iter().find(|r| r.line == c.line) {
+            let seg = row.segs.iter().find(|s| c.index >= s.start && c.index <= s.end)?;
+            let (x, y) = seg.buffer.cursor_position(&Cursor::new(0, c.index - seg.start))?;
+            let h = seg.buffer.layout_runs().find(|r| r.line_top as i32 == y as i32).map(|r| r.line_height).unwrap_or(row.h);
+            return Some((seg.x + x as f32, top(c.line)? + seg.y + y as f32, h));
+        }
+        self.editor.with_buffer(|b| {
+            let runs: Vec<_> = b.layout_runs().filter(|r| r.line_i == c.line).collect();
+            let run = runs.iter().find(|r| r.glyphs.last().is_none_or(|l| c.index <= l.end)).or(runs.last())?;
+            let x = run
+                .glyphs
+                .iter()
+                .find(|g| g.start >= c.index)
+                .map(|g| g.x)
+                .or_else(|| run.glyphs.last().map(|g| g.x + g.w))
+                .unwrap_or(0.0);
+            Some((x, run.line_top, run.line_height))
+        })
     }
 
     /// Atributos base de uma linha (títulos maiores, cabeçalho de tabela em negrito).
@@ -1622,6 +1799,7 @@ struct Hits {
     /// Divisores arrastáveis: (área de arraste, bloco, coluna à direita).
     col_divs: Vec<(Rect, usize, usize)>,
     cells: Vec<CellHit>,
+    segs: Vec<SegHit>,
     images: Vec<ImgHit>,
 }
 
@@ -2045,6 +2223,7 @@ impl Ui {
         let mut col_divs = Vec::new();
         let mut cells = Vec::new();
         let mut img_hits = Vec::new();
+        let mut seg_hits: Vec<SegHit> = Vec::new();
         let div_active = self.col_div_active();
         {
             let Ui { font_system, swash, tabs, active, traced, images, prof, img_sel, img_hover, img_ghost, .. } = self;
@@ -2075,7 +2254,8 @@ impl Ui {
             prof_add(prof, P_GLYPHS, pt);
             pt = Instant::now();
             let all: Vec<&md::LineInfo> = tab.lines.iter().collect();
-            let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift));
+            let row_lines: Vec<usize> = tab.img_rows.iter().map(|r| r.line).collect();
+            let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift, &row_lines));
             draw_decos(canvas, decos, ox, oy, &mut checkboxes, &mut toggles);
             // ---- colunas: sub-buffers no espaço da linha `:::` ----
             let sel = tab.editor.selection_bounds();
@@ -2133,7 +2313,7 @@ impl Ui {
                     }
                     if !col.map.is_empty() {
                         let infos: Vec<&md::LineInfo> = col.map.iter().map(|&m| &tab.lines[m]).collect();
-                        let decos = collect_decos(&col.buffer, &infos, font_px, col.w, scale, &col.map, &tab.line_shift);
+                        let decos = collect_decos(&col.buffer, &infos, font_px, col.w, scale, &col.map, &tab.line_shift, &[]);
                         draw_decos(canvas, decos, x0, y0, &mut checkboxes, &mut toggles);
                         if let (true, Some(sl)) = (focused, col.sub_line(cursor.line)) {
                             let sub = Cursor::new(sl, cursor.index);
@@ -2222,29 +2402,22 @@ impl Ui {
             }
             let in_table = tab.tables.iter().any(|t| cursor.line >= t.start && cursor.line <= t.end);
             let in_column = tab.column_of(cursor.line).is_some();
-            // Imagens em linha: no lugar do glifo reservado (`!` do marcador).
-            let placements: Vec<(usize, i32, i32, i32)> = tab.editor.with_buffer(|b| {
-                let mut v = Vec::new();
-                for run in b.layout_runs() {
-                    for (k, im) in tab.inline_imgs.iter().enumerate() {
-                        if im.line != run.line_i {
-                            continue;
-                        }
-                        if let Some(g) = run.glyphs.iter().find(|g| g.start == im.idx) {
-                            let dy = tab.line_shift.get(run.line_i).copied().unwrap_or(0);
-                            let x = g.physical((0.0, run.line_y), 1.0).x;
-                            let y = run.line_top as i32 + ((run.line_height as i32 - im.h as i32) / 2).max(0) + dy;
-                            v.push((k, x, y, run.line_i as i32));
-                        }
-                    }
-                }
-                v
+            // ---- linhas com imagem: faixas texto | imagem | texto ----
+            let row_tops: Vec<(usize, i32)> = tab.editor.with_buffer(|b| {
+                b.layout_runs().filter(|r| tab.img_rows.iter().any(|row| row.line == r.line_i)).map(|r| (r.line_i, r.line_top as i32)).collect()
             });
+            let in_img_row = tab.img_rows.iter().any(|r| r.line == cursor.line);
             let mut sel_shown = false;
-            for (k, x, y, _) in placements {
-                let im = &tab.inline_imgs[k];
-                if let Some(bm) = images.scaled(&im.path, im.w) {
-                    let rect = Rect::new(ox + x, oy + y, bm.w as i32, bm.h as i32);
+            for (ri, row) in tab.img_rows.iter().enumerate() {
+                let Some(&(_, top)) = row_tops.iter().find(|(l, _)| *l == row.line) else { continue };
+                let y = oy + top;
+                canvas.set_clip(editor);
+                // Cobre o realce de seleção da linha crua invisível.
+                canvas.rect(ox, y, (text_w.max(row.w)) as i32, row.h as i32, BLACK);
+                for &(k, ix, iy) in &row.imgs {
+                    let im = &tab.inline_imgs[k];
+                    let Some(bm) = images.scaled(&im.path, im.w) else { continue };
+                    let rect = Rect::new(ox + ix as i32, y + iy as i32, bm.w as i32, bm.h as i32);
                     canvas.blit(rect.x, rect.y, bm.w, bm.h, &bm.rgba);
                     // Borda fina: branca na selecionada, apagada sob o mouse.
                     let key = Some((im.line, im.start));
@@ -2257,13 +2430,43 @@ impl Ui {
                         None
                     };
                     if let Some(c) = border {
-                        let t = (scale).max(1);
+                        let t = scale.max(1);
                         canvas.rect(rect.x - t, rect.y - t, rect.w + 2 * t, t, c);
                         canvas.rect(rect.x - t, rect.bottom(), rect.w + 2 * t, t, c);
                         canvas.rect(rect.x - t, rect.y, t, rect.h, c);
                         canvas.rect(rect.right(), rect.y, t, rect.h, c);
                     }
                     img_hits.push(ImgHit { rect, line: im.line, start: im.start, end: im.end });
+                }
+                for (si, seg) in row.segs.iter().enumerate() {
+                    let (tx, ty) = (ox + seg.x as i32, y + seg.y as i32);
+                    let len = seg.end - seg.start;
+                    if let Some((s, e)) = sel {
+                        let l = row.line;
+                        if s.line <= l && e.line >= l {
+                            let ls = if s.line < l { 0 } else { s.index.saturating_sub(seg.start).min(len) };
+                            let le = if e.line > l { len } else { e.index.saturating_sub(seg.start).min(len) };
+                            if le > ls {
+                                for run in seg.buffer.layout_runs() {
+                                    for (hx, hw) in run.highlight(Cursor::new(0, ls), Cursor::new(0, le)) {
+                                        canvas.rect(tx + hx as i32, ty + run.line_top as i32, hw.max(1.0) as i32, run.line_height as i32, SELECTION);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    {
+                        let mut r = FastRenderer { canvas, fs: font_system, cache: swash, ox: tx, oy: ty };
+                        render_buffer(&seg.buffer, &mut r, WHITE);
+                    }
+                    if seg.start == 0 {
+                        // Marcadores de bloco (lista, tarefa, citação) do começo da linha.
+                        let info = [&tab.lines[row.line]];
+                        let decos = collect_decos(&seg.buffer, &info, font_px, text_w, scale, &[row.line], &[], &[]);
+                        draw_decos(canvas, decos, tx, ty, &mut checkboxes, &mut toggles);
+                    }
+                    let hit_w = (seg.hit_end - seg.x).max(1.0) as i32;
+                    seg_hits.push(SegHit { rect: Rect::new(tx, y, hit_w, row.h as i32), line: row.line, start: seg.start, ri, si, tx, ty });
                 }
             }
             if !sel_shown {
@@ -2272,40 +2475,25 @@ impl Ui {
             // Prévia da imagem sendo arrastada: 50 % de opacidade e menos saturada,
             // no ponto onde ela cairia.
             if let Some(g) = img_ghost.as_ref() {
-                let spot = tab.editor.with_buffer(|b| {
-                    let run = b.layout_runs().filter(|r| r.line_i == g.target.line).find(|r| {
-                        r.glyphs.last().is_none_or(|l| g.target.index <= l.end)
-                    }).or_else(|| b.layout_runs().filter(|r| r.line_i == g.target.line).last())?;
-                    let x = run
-                        .glyphs
-                        .iter()
-                        .find(|gl| gl.start >= g.target.index)
-                        .map(|gl| gl.x)
-                        .or_else(|| run.glyphs.last().map(|gl| gl.x + gl.w))
-                        .unwrap_or(0.0);
-                    Some((x.round() as i32, run.line_top as i32))
-                });
-                if let (Some((x, y)), Some(bm)) = (spot, images.scaled(&g.path, g.w)) {
-                    let dy = tab.line_shift.get(g.target.line).copied().unwrap_or(0);
-                    canvas.blit_ghost(ox + x, oy + y + dy, bm.w, bm.h, &bm.rgba);
-                    canvas.rect(ox + x - cursor_w, oy + y + dy, cursor_w, bm.h as i32, DIM);
+                if let (Some((x, y, _)), Some(bm)) = (tab.caret_xy(g.target), images.scaled(&g.path, g.w)) {
+                    let (x, y) = (ox + x.round() as i32, oy + y.round() as i32);
+                    canvas.set_clip(editor);
+                    canvas.blit_ghost(x, y, bm.w, bm.h, &bm.rgba);
+                    canvas.rect(x - cursor_w, y, cursor_w, bm.h as i32, DIM);
                 }
             }
             if focused && !in_column && !in_table && !sel_shown {
-                if let Some((cx, cy)) = tab.editor.cursor_position() {
+                if in_img_row {
+                    if let Some((cx, cy, ch)) = tab.caret_xy(cursor) {
+                        canvas.set_clip(editor);
+                        canvas.rect(ox + cx as i32, oy + cy as i32, cursor_w, ch as i32, WHITE);
+                    }
+                } else if let Some((cx, cy)) = tab.editor.cursor_position() {
                     let lh = tab.editor.with_buffer(|b| {
                         b.layout_runs().find(|r| r.line_i == tab.editor.cursor().line).map(|r| r.line_height as i32)
                     });
                     let dy = tab.line_shift.get(cursor.line).copied().unwrap_or(0);
-                    let mut lh = lh.unwrap_or(line_height);
-                    let mut cy = cy + dy;
-                    // Ao lado de uma imagem a linha é alta: o cursor fica do
-                    // tamanho do texto, centrado como o texto.
-                    if lh > line_height && tab.inline_imgs.iter().any(|im| im.line == cursor.line) {
-                        cy += (lh - line_height) / 2;
-                        lh = line_height;
-                    }
-                    canvas.rect(ox + cx, oy + cy, cursor_w, lh, WHITE);
+                    canvas.rect(ox + cx, oy + cy + dy, cursor_w, lh.unwrap_or(line_height), WHITE);
                 }
             }
             canvas.reset_clip();
@@ -2376,6 +2564,7 @@ impl Ui {
             cols,
             col_divs,
             cells,
+            segs: seg_hits,
             images: img_hits,
         };
     }
@@ -2755,7 +2944,8 @@ fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxe
 }
 
 /// Decorações Markdown a partir das posições reais dos glifos.
-fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32, scale: i32, map: &[usize], shift: &[i32]) -> Vec<Deco> {
+/// `rows`: linhas do buffer principal desenhadas como faixa de imagem (sem decoração aqui).
+fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32, scale: i32, map: &[usize], shift: &[i32], rows: &[usize]) -> Vec<Deco> {
     let mut out = Vec::new();
     let s = scale as f32;
     let thin = (1.0 * s).round().max(1.0) as i32;
@@ -2766,7 +2956,7 @@ fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32,
             let Some(info) = lines.get(run.line_i).copied() else { continue };
             let abs_line = map.get(run.line_i).copied().unwrap_or(run.line_i);
             let in_main = map.is_empty();
-            if info.folded || (in_main && (info.col.is_some() || matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd))) {
+            if info.folded || (in_main && (info.col.is_some() || rows.contains(&abs_line) || matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd))) {
                 continue;
             }
             let dy = shift.get(abs_line).copied().unwrap_or(0);
@@ -3490,6 +3680,15 @@ impl App {
             self.request_redraw();
             return;
         }
+        if matches!(m, Motion::Up | Motion::Down) && self.row_vertical(m == Motion::Down, before) {
+            if shift {
+                self.update_primary();
+            }
+            self.wake_cursor();
+            self.request_redraw();
+            return;
+        }
+        let before_x = self.ui.tab().caret_xy(before).map(|c| c.0);
         let (fs, tab) = self.ui.ed();
         // Home alterna entre o primeiro caractere não-branco e a coluna 0.
         let m = if m == Motion::Home {
@@ -3511,6 +3710,16 @@ impl App {
                 _ => {}
             }
         }
+        // Entrando ou saindo de uma faixa de imagem na vertical: a coluna (x)
+        // vem da posição visual, não dos glifos invisíveis da linha crua.
+        let now = tab.editor.cursor();
+        if matches!(m, Motion::Up | Motion::Down) && now.line != before.line {
+            let rows = |l: usize| self.ui.tab().img_rows.iter().any(|r| r.line == l);
+            if let (true, Some(x)) = (rows(before.line) || rows(now.line), before_x) {
+                self.place_at_x(now.line, x, m == Motion::Down);
+            }
+        }
+        let tab = self.ui.tab();
         let horizontal = !matches!(m, Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown | Motion::Vertical(_));
         let forward = match m {
             Motion::BufferStart => true,
@@ -4837,6 +5046,48 @@ impl App {
             .map(|im| (im.start, im.end))
     }
 
+    /// ↑/↓ dentro de um trecho de texto com várias linhas numa faixa de imagem.
+    fn row_vertical(&mut self, down: bool, c: Cursor) -> bool {
+        let tab = self.ui.tab();
+        let Some(row) = tab.img_rows.iter().find(|r| r.line == c.line) else { return false };
+        let Some(seg) = row.segs.iter().find(|s| c.index >= s.start && c.index <= s.end) else { return false };
+        let Some((x, y)) = seg.buffer.cursor_position(&Cursor::new(0, c.index - seg.start)) else { return false };
+        let runs: Vec<(f32, f32)> = seg.buffer.layout_runs().map(|r| (r.line_top, r.line_height)).collect();
+        let y = y as f32;
+        let Some(ri) = runs.iter().position(|&(t, h)| y >= t - 0.5 && y < t + h) else { return false };
+        let target = if down { ri + 1 } else if ri > 0 { ri - 1 } else { return false };
+        let Some(&(t, h)) = runs.get(target) else { return false };
+        let Some(hit) = seg.buffer.hit(x as f32, t + h / 2.0) else { return false };
+        let idx = seg.start + hit.index.min(seg.end - seg.start);
+        self.ui.tab_mut().editor.set_cursor(Cursor::new(c.line, idx));
+        true
+    }
+
+    /// Põe o cursor na linha `line` na coluna visual `x` (na primeira faixa
+    /// visual vindo de cima, na última vindo de baixo).
+    fn place_at_x(&mut self, line: usize, x: f32, from_above: bool) {
+        let tab = self.ui.tab();
+        let c = if let Some(row) = tab.img_rows.iter().find(|r| r.line == line) {
+            let Some(seg) = row.segs.iter().find(|s| x < s.hit_end).or(row.segs.last()) else { return };
+            let runs: Vec<(f32, f32)> = seg.buffer.layout_runs().map(|r| (r.line_top, r.line_height)).collect();
+            let run = if from_above { runs.first() } else { runs.last() };
+            let Some(&(t, h)) = run else { return };
+            let idx = seg.buffer.hit((x - seg.x).max(0.0), t + h / 2.0).map(|c| c.index).unwrap_or(0);
+            Cursor::new(line, seg.start + idx.min(seg.end - seg.start))
+        } else {
+            let hit = tab.editor.with_buffer(|b| {
+                let runs: Vec<_> = b.layout_runs().filter(|r| r.line_i == line).map(|r| (r.line_top, r.line_height)).collect();
+                let &(t, h) = if from_above { runs.first() } else { runs.last() }?;
+                b.hit(x, t + h / 2.0)
+            });
+            match hit {
+                Some(c) if c.line == line => c,
+                _ => return,
+            }
+        };
+        self.ui.tab_mut().editor.set_cursor(c);
+    }
+
     /// O marcador da imagem é um caractere só: o cursor nunca fica dentro dele.
     fn snap_out_of_image(&mut self, forward: bool) {
         let c = self.ui.tab().editor.cursor();
@@ -4894,7 +5145,7 @@ impl App {
         }
         self.set_cursor_icon(CursorIcon::Grabbing);
         let (x, y) = self.editor_coords(px, py);
-        let hit = self.ui.tab().editor.with_buffer(|b| b.hit(x as f32, y as f32));
+        let hit = self.seg_hit(px, py).or_else(|| self.ui.tab().editor.with_buffer(|b| b.hit(x as f32, y as f32)));
         let target = hit.filter(|c| self.droppable(c.line)).map(|c| {
             // Nunca dentro de outra imagem: cai logo depois dela.
             match self.image_around(c) {
@@ -5526,7 +5777,7 @@ impl App {
         let was = self.ui.hover;
         self.ui.hover = (px, py);
         if self.pointer_down && !self.ui.list_open {
-            if let Some(c) = self.cell_hit(px, py).or_else(|| self.column_hit(px, py)) {
+            if let Some(c) = self.cell_hit(px, py).or_else(|| self.seg_hit(px, py)).or_else(|| self.column_hit(px, py)) {
                 let tab = self.ui.tab_mut();
                 if tab.editor.selection() == Selection::None {
                     tab.editor.set_selection(Selection::Normal(tab.editor.cursor()));
@@ -5553,6 +5804,17 @@ impl App {
         let sub = col.buffer.hit((px - rect.x) as f32, (py - rect.y) as f32)?;
         let main = *col.map.get(sub.line).or(col.map.last())?;
         Some(Cursor::new(main, sub.index))
+    }
+
+    /// Clique/arraste num trecho de texto de uma faixa de imagem → cursor na linha crua.
+    fn seg_hit(&self, px: i32, py: i32) -> Option<Cursor> {
+        let h = self.ui.hits.segs.iter().find(|s| s.rect.contains(px, py))?;
+        let seg = self.ui.tab().img_rows.get(h.ri)?.segs.get(h.si).filter(|s| s.start == h.start)?;
+        let len = seg.end - seg.start;
+        let bh = seg.buffer.layout_runs().last().map(|r| r.line_top + r.line_height).unwrap_or(1.0);
+        let (x, y) = ((px - h.tx) as f32, ((py - h.ty) as f32).clamp(0.0, (bh - 1.0).max(0.0)));
+        let idx = if x < 0.0 { 0 } else { seg.buffer.hit(x, y).map(|c| c.index).unwrap_or(len) };
+        Some(Cursor::new(h.line, seg.start + idx.min(len)))
     }
 
     /// Clique numa célula de tabela → cursor na posição correspondente da linha crua.
@@ -5719,7 +5981,7 @@ impl App {
             self.ui.img_sel = None;
         }
         if button == BTN_LEFT {
-            if let Some(c) = self.cell_hit(px, py).or_else(|| self.column_hit(px, py)) {
+            if let Some(c) = self.cell_hit(px, py).or_else(|| self.seg_hit(px, py)).or_else(|| self.column_hit(px, py)) {
                 let tab = self.ui.tab_mut();
                 if self.modifiers.shift {
                     if tab.editor.selection() == Selection::None {
