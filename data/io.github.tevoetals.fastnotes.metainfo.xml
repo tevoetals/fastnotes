@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.5.0" date="2026-10-06">
+      <description>
+        <p>Agenda: timers em tarefas com fila, auto-pomodoro e lembretes de eventos no PC e no Telegram. Páginas lado a lado, divisor da tela inteira e menu do botão direito.</p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-05">
       <description>
         <p>Imagens: clique seleciona e o texto digitado sai depois da imagem; arrastar move a imagem entre linhas com prévia; qualquer borda redimensiona.</p>
