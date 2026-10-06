@@ -123,7 +123,8 @@ que já é divisor, `Ctrl+-` alterna entre `---` (largura da página) e `___`
 Numa linha vazia (ou só com espaços) digite `/`: abre o menu de blocos. Continue
 digitando para filtrar (`/tab`, `/col`, `/img`), `↑↓` escolhe, `Enter` aplica,
 `Esc` fecha. Itens: Título 1–3, Texto normal, Lista, Lista numerada, Checkbox,
-Toggle, Citação, Divisor, Tabela, 2/3/4 colunas, Imagem, Bloco de código.
+Timer, Evento, Toggle, Citação, Divisor, Divisor da tela inteira, Página ao
+lado, Tabela, 2/3/4 colunas, Imagem, Bloco de código.
 
 ### Toggles (conteúdo recolhível)
 
@@ -331,6 +332,45 @@ Primeira Maiúscula; sempre aparecem colar, selecionar tudo, títulos, listas,
 tarefa, citação, duplicar/apagar linha, emoji, divisor da tela inteira e
 página ao lado. Clicar fora da seleção move o cursor antes de abrir o menu.
 
+### Agenda: timers, pausas e eventos
+
+**Timer numa tarefa.** Escreva `⏱ 25m` numa tarefa (`- [ ] Escrever ⏱ 25m`)
+ou use `/timer` (numa linha vazia cria `- [ ] ⏱ 25m` com o cursor no lugar
+do nome; numa linha com texto, acrescenta o timer e seleciona a duração para
+você trocar digitando). Durações: `25m`, `25min`, `25` (minutos), `1h`,
+`1h30`, `90s`.
+
+- **Clique no `⏱ 25m`** para iniciar; clique de novo para pausar e retomar.
+  Rodando, ele vira uma pílula que se enche conforme o tempo passa, e o
+  rodapé mostra a contagem (`⏱ 12:41 · Escrever`). Iniciar um timer pausa o
+  que estava rodando na mesma nota. O item "Iniciar/pausar timer" do menu do
+  botão direito faz o mesmo na linha do cursor.
+- **Fila de cima para baixo:** quando um timer acaba, o próximo timer parado
+  abaixo dele (na mesma página e depois nas seguintes) começa sozinho.
+  Marcou a tarefa antes do fim? O timer para e o próximo já começa.
+- **Tempo esgotado sem marcar:** a linha ganha `⚠️`, sai uma notificação no
+  PC ("⏱ Tempo esgotado", com a próxima tarefa) e a fila segue. Para tentar
+  de novo, clique no timer.
+- **Auto-pomodoro:** a cada 1 h de timers seguidos, antes da próxima tarefa
+  entra sozinha uma `- [ ] Descanse ⏱ 10m`, que roda como qualquer outra;
+  terminada a pausa, a contagem recomeça.
+- O estado fica no próprio texto, depois da duração, e só aparece na linha
+  em edição: `▶14:32:10` (rodando, termina às 14:32:10), `⏸12:41` (pausado,
+  faltam 12:41). Fechar o app não perde o timer: ao abrir de novo ele
+  continua (ou já conta como esgotado).
+
+**Eventos com data.** `📅 07/10 14:30` em qualquer linha (ou `/evento`, que
+põe amanhã às 9h com a data selecionada). Formatos: `📅 2026-10-07 14:30`,
+`📅 07/10/2026 14h30`, `📅 07/10 14h`, `📅 07/10` (sem hora: aviso às 9h).
+Avisos: notificação no PC 10 minutos antes e na hora, e a mesma coisa no
+Telegram (veja abaixo). Tarefa marcada (`- [x]`) não avisa. Cada aviso sai
+uma vez só, mesmo com o app e o bot rodando juntos (marcas em
+`~/.local/state/fastnotes/avisos`); um aviso perdido com o PC desligado
+ainda sai até 30 minutos depois.
+
+O app dá os avisos do PC enquanto está aberto; com o bot do Telegram ligado
+(serviço do sistema, sobe com a sessão), eles saem mesmo com o app fechado.
+
 ### Notas e abas
 
 - `Ctrl+Shift+N` duplica a nota atual numa aba nova (vira outro arquivo ao
@@ -384,7 +424,7 @@ fastnotes-telegram enable                  # serviço systemd de usuário, sobe 
 `setup` mostrou e toque em **Iniciar**. O bot responde "Pareado!" e, dali em
 diante, ignora qualquer outra pessoa que o encontre.
 
-**Uso.** O teclado do bot tem **📒 Notas** e **➕ Nova nota**. O Telegram não
+**Uso.** O teclado do bot tem **📒 Notas**, **➕ Nova nota** e **📅 Agenda**. O Telegram não
 tem menu suspenso; a lista vem como botões, 8 notas por página, da mais
 recente para a mais antiga. Tocando numa nota o bot mostra o texto num bloco
 que se copia com um toque, com os botões:
@@ -398,6 +438,13 @@ que se copia com um toque, com os botões:
 
 Texto mandado sem contexto pergunta se vira nota nova ou se vai para o fim de
 uma nota existente. `/cancelar` desiste de uma edição em andamento.
+
+**Agenda e lembretes no celular.** **📅 Agenda** (ou `/agenda`) lista os
+timers rodando e os eventos `📅` dos próximos 60 dias, de todas as notas. O
+bot varre as notas a cada 20 s e manda "📅 Daqui a 10 minutos", "📅 Agora" e
+"⏱ Tempo esgotado" no chat, e também como notificação no PC. Para marcar um
+evento pelo celular, acrescente a uma nota uma linha como
+`- Dentista 📅 07/10 14:30`.
 
 **Markdown preservado.** O app do Telegram transforma `**negrito**`,
 `*itálico*`, `` `código` ``, `~~riscado~~`, blocos ```` ``` ```` e links em

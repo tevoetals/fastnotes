@@ -8,10 +8,16 @@
 //!   fastnotes-telegram run             atende o bot (o serviço systemd roda isto)
 //!   fastnotes-telegram enable|disable  liga/desliga o serviço de usuário
 //!   fastnotes-telegram status          mostra bot, chat pareado e serviço
+//!
+//! Também dá os lembretes da agenda: eventos `📅` (10 min antes e na hora)
+//! e timers `⏱` esgotados, no Telegram e como notificação no PC.
 
 #[path = "../store.rs"]
 #[allow(dead_code)]
 mod store;
+#[path = "../agenda.rs"]
+#[allow(dead_code)]
+mod agenda;
 
 use serde_json::{json, Value};
 use std::io::{self, Write};
@@ -25,6 +31,9 @@ const PAGE: usize = 8;
 const INLINE_MAX: usize = 3500;
 const BTN_NOTES: &str = "📒 Notas";
 const BTN_NEW: &str = "➕ Nova nota";
+const BTN_AGENDA: &str = "📅 Agenda";
+/// Intervalo entre as varreduras de lembretes.
+const REMIND_EVERY: Duration = Duration::from_secs(20);
 
 // ---------------------------------------------------------------------------
 // Configuração: ~/.config/fastnotes/telegram.conf (modo 0600)
@@ -275,7 +284,7 @@ struct Bot {
 }
 
 fn main_keyboard() -> Value {
-    json!({ "keyboard": [[{ "text": BTN_NOTES }, { "text": BTN_NEW }]], "resize_keyboard": true, "is_persistent": true })
+    json!({ "keyboard": [[{ "text": BTN_NOTES }, { "text": BTN_NEW }, { "text": BTN_AGENDA }]], "resize_keyboard": true, "is_persistent": true })
 }
 
 impl Bot {
@@ -419,6 +428,44 @@ impl Bot {
         self.say(html, Some(json!({ "force_reply": true, "input_field_placeholder": "Texto da nota…" })));
     }
 
+    /// Próximos eventos (60 dias) e timers rodando, de todas as notas.
+    fn send_agenda(&self) {
+        let now = agenda::now();
+        let mut events: Vec<(i64, String)> = Vec::new();
+        let mut timers: Vec<String> = Vec::new();
+        for n in self.store.list() {
+            let text = self.store.read(&n.path).unwrap_or_default();
+            let note = cut(&n.title, 30);
+            for line in text.lines() {
+                if agenda::is_done(line) {
+                    continue;
+                }
+                if let Some(e) = agenda::parse_event(line, now).filter(|e| e.when >= now - 3600 && e.when < now + 60 * 86_400) {
+                    let item = format!("<b>{}</b> · {} <i>({})</i>", agenda::fmt_when(e.when, e.has_time), esc(&agenda::title_of_line(line)), esc(&note));
+                    events.push((e.when, item));
+                }
+                if let Some(end) = agenda::parse_timer(line).and_then(|t| agenda::deadline(&t, now)).filter(|&e| e > now) {
+                    timers.push(format!("⏱ <b>{}</b> restantes · {} <i>({})</i>", agenda::fmt_left(end - now), esc(&agenda::title_of_line(line)), esc(&note)));
+                }
+            }
+        }
+        events.sort_by_key(|(t, _)| *t);
+        let mut out = String::from("📅 <b>Agenda</b>\n");
+        for t in &timers {
+            out.push_str(&format!("\n{t}"));
+        }
+        if !timers.is_empty() {
+            out.push('\n');
+        }
+        if events.is_empty() {
+            out.push_str("\nNenhum evento nos próximos 60 dias. Escreva numa nota, por exemplo:\n<code>- Dentista 📅 07/10 14:30</code>");
+        }
+        for (_, e) in events.iter().take(25) {
+            out.push_str(&format!("\n{e}"));
+        }
+        self.say(&out, Some(main_keyboard()));
+    }
+
     fn welcome(&self) {
         self.say(
             "Olá! Este bot mostra e edita as notas do Fast Notes no seu PC.\n\n\
@@ -427,7 +474,9 @@ impl Bot {
              <b>➕ Acrescentar</b> junta ao fim.\n\
              • Para editar: toque no bloco de texto para copiá-lo, cole, mude e envie.\n\
              • Texto solto vira nota nova ou vai para uma nota existente.\n\
-             • Nota longa? Mande um arquivo <code>.md</code>.\n\n\
+             • Nota longa? Mande um arquivo <code>.md</code>.\n             • <b>📅 Agenda</b> mostra os próximos eventos. Uma linha com \
+             <code>📅 07/10 14:00</code> numa nota avisa aqui 10 min antes e na hora; \
+             tarefas com <code>⏱ 25m</code> avisam quando o tempo acaba.\n\n\
              /cancelar desiste de uma edição em andamento.",
             Some(main_keyboard()),
         );
@@ -469,6 +518,7 @@ impl Bot {
                 self.pending = Some(Pending::New);
                 return self.prompt("Mande o texto da nota nova (ou um arquivo <code>.md</code>).");
             }
+            "/agenda" | BTN_AGENDA => return self.send_agenda(),
             "/cancelar" => {
                 self.pending = None;
                 self.stash = None;
@@ -577,6 +627,7 @@ impl Bot {
             json!({ "commands": [
                 { "command": "notas", "description": "Listar as notas" },
                 { "command": "nova", "description": "Criar uma nota" },
+                { "command": "agenda", "description": "Próximos eventos e timers" },
                 { "command": "cancelar", "description": "Desistir da edição em andamento" },
                 { "command": "ajuda", "description": "Como usar" }
             ]}),
@@ -603,6 +654,65 @@ impl Bot {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lembretes (thread própria: a principal fica presa no getUpdates)
+// ---------------------------------------------------------------------------
+
+/// Varre as notas a cada `REMIND_EVERY`: eventos `📅` 10 min antes e na hora,
+/// timers `⏱` que acabaram. Cada aviso sai uma vez no Telegram e uma no PC
+/// (o app aberto também avisa no PC; a marca em comum evita a repetição).
+fn reminders(token: &str) {
+    let api = Api::new(token);
+    let Ok(store) = Store::open() else { return };
+    loop {
+        let now = agenda::now();
+        // O pareamento pode acontecer depois que o serviço subiu.
+        let chat = load_config().and_then(|c| c.chat);
+        let send = |key: &str, head: &str, body: &str, note: &str| {
+            if agenda::claim(&format!("pc:{key}")) {
+                agenda::notify(head, body);
+            }
+            if let Some(chat) = chat {
+                if agenda::claim(&format!("tg:{key}")) {
+                    let html = format!("{} <b>{}</b>\n{}\n<i>{}</i>", "🔔", esc(head), esc(body), esc(note));
+                    let msg = json!({ "chat_id": chat, "text": html, "parse_mode": "HTML" });
+                    if let Err(e) = api.call("sendMessage", msg) {
+                        eprintln!("lembrete: {e}");
+                    }
+                }
+            }
+        };
+        for n in store.list() {
+            let text = store.read(&n.path).unwrap_or_default();
+            if !text.contains(agenda::EVENT) && !text.contains(agenda::TIMER) {
+                continue;
+            }
+            for line in text.lines() {
+                if agenda::is_done(line) {
+                    continue;
+                }
+                let title = agenda::title_of_line(line);
+                if let Some(e) = agenda::parse_event(line, now) {
+                    let when = agenda::fmt_when(e.when, e.has_time);
+                    for (kind, at) in [("antes", e.when - agenda::EARLY_SECS), ("hora", e.when)] {
+                        if (kind == "antes" && (!e.has_time || now >= e.when)) || now < at || now - at >= agenda::GRACE_SECS {
+                            continue;
+                        }
+                        let head = if kind == "antes" { "📅 Daqui a 10 minutos" } else { "📅 Agora" };
+                        send(&format!("{kind}:{}:{title}", e.when), head, &format!("{title} · {when}"), &n.title);
+                    }
+                }
+                if let Some(end) = agenda::parse_timer(line).and_then(|t| agenda::deadline(&t, now)) {
+                    if now >= end && now - end < agenda::GRACE_SECS {
+                        send(&format!("timer:{end}:{title}"), "⏱ Tempo esgotado", &title, &n.title);
+                    }
+                }
+            }
+        }
+        std::thread::sleep(REMIND_EVERY);
     }
 }
 
@@ -723,6 +833,8 @@ fn main() {
                 eprintln!("pasta de notas: {e}");
                 std::process::exit(1);
             });
+            let token = cfg.token.clone();
+            std::thread::spawn(move || reminders(&token));
             let mut bot = Bot { api: Api::new(&cfg.token), store, cfg, pending: None, stash: None };
             bot.run()
         }

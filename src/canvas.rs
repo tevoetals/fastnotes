@@ -54,6 +54,9 @@ impl<'a> Canvas<'a> {
     pub fn set_clip(&mut self, r: Rect) {
         self.clip = r.intersect(&Rect::new(0, 0, self.w, self.h));
     }
+    pub fn clip(&self) -> Rect {
+        self.clip
+    }
     pub fn reset_clip(&mut self) {
         self.clip = Rect::new(0, 0, self.w, self.h);
     }

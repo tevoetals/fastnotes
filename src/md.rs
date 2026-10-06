@@ -82,6 +82,8 @@ pub struct LineInfo {
     pub hard_break: bool,
     /// Régua `___`: divisória que vai até a borda da tela, não só da página.
     pub full_rule: bool,
+    /// Timer de uma tarefa (`⏱ 25m`).
+    pub timer: Option<crate::agenda::TimerMark>,
 }
 
 pub const TOGGLE_OPEN: &str = "▾";
@@ -200,6 +202,7 @@ fn empty_info() -> LineInfo {
         images: Vec::new(),
         hard_break: false,
         full_rule: false,
+        timer: None,
     }
 }
 
@@ -421,6 +424,18 @@ fn analyze_line(line: &str, in_code: &mut bool) -> LineInfo {
     let content = content.min(len);
     info.images = inline_images(line);
     inline(line, content..len, &mut flags);
+    // Agenda: o estado do timer (`▶14:32:10`) só aparece na linha em edição;
+    // duração e data ficam discretas.
+    if matches!(info.block, Block::Task(_)) {
+        if let Some(t) = crate::agenda::parse_timer(line).filter(|t| t.at >= content) {
+            set(&mut flags, t.state_range.clone(), |f| f.marker = true);
+            set(&mut flags, t.at..t.dur_end, |f| f.dim = true);
+            info.timer = Some(t);
+        }
+    }
+    if let Some(e) = crate::agenda::parse_event(line, crate::agenda::now()).filter(|e| e.at >= content) {
+        set(&mut flags, e.at..e.end, |f| f.dim = true);
+    }
     // Quebra dura: número ímpar de `\` no fim (o último é o marcador).
     if info.block != Block::Table && len > content {
         let trailing = bytes[content..].iter().rev().take_while(|&&c| c == b'\\').count();

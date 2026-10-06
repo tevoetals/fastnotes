@@ -3,6 +3,7 @@
 //! cosmic-text, acentos/dead keys via xkbcommon compose, auto-save após pausa,
 //! Markdown renderizado ao vivo, várias abas.
 
+mod agenda;
 mod canvas;
 mod img;
 mod md;
@@ -198,7 +199,7 @@ fn tracking(size_px: f32) -> f32 {
 }
 
 /// Menu `/`: (rótulo, chave, palavras para busca).
-const SLASH_ITEMS: [(&str, &str, &str); 18] = [
+const SLASH_ITEMS: [(&str, &str, &str); 20] = [
     ("Título 1", "h1", "titulo heading h1"),
     ("Título 2", "h2", "titulo heading h2"),
     ("Título 3", "h3", "titulo heading h3"),
@@ -206,6 +207,8 @@ const SLASH_ITEMS: [(&str, &str, &str); 18] = [
     ("Lista", "ul", "lista pontos bullet"),
     ("Lista numerada", "ol", "lista numerada numeros"),
     ("Checkbox", "todo", "checkbox tarefa todo caixa"),
+    ("Timer", "timer", "timer tempo cronometro pomodoro relogio"),
+    ("Evento", "event", "evento data agenda lembrete alarme calendario"),
     ("Toggle", "toggle", "toggle dobra esconder recolher"),
     ("Citação", "quote", "citacao quote"),
     ("Divisor", "hr", "divisor linha separador"),
@@ -221,7 +224,7 @@ const SLASH_ITEMS: [(&str, &str, &str); 18] = [
 
 /// Ações do menu do botão direito: (rótulo, atalho, chave, palavras de
 /// busca, só com seleção).
-const CTX_ITEMS: [(&str, &str, &str, &str, bool); 27] = [
+const CTX_ITEMS: [(&str, &str, &str, &str, bool); 29] = [
     ("Copiar", "Ctrl+C", "copy", "copiar copy", true),
     ("Recortar", "Ctrl+X", "cut", "recortar cortar cut", true),
     ("Colar", "Ctrl+V", "paste", "colar paste", false),
@@ -243,6 +246,8 @@ const CTX_ITEMS: [(&str, &str, &str, &str, bool); 27] = [
     ("Lista", "Ctrl+Shift+8", "ul", "lista pontos bullet", false),
     ("Lista numerada", "Ctrl+Shift+7", "ol", "lista numerada numeros", false),
     ("Tarefa", "Ctrl+Shift+9", "todo", "tarefa checkbox todo caixa", false),
+    ("Iniciar/pausar timer", "", "timer", "timer tempo cronometro pomodoro iniciar pausar", false),
+    ("Evento com data", "", "event", "evento data agenda lembrete alarme calendario", false),
     ("Citação", "Ctrl+Shift+Q", "quote", "citacao quote", false),
     ("Duplicar linha", "Ctrl+D", "dup", "duplicar linha copiar", false),
     ("Apagar linha", "Ctrl+Shift+K", "delline", "apagar linha excluir deletar", false),
@@ -564,6 +569,10 @@ impl Renderer for FastRenderer<'_, '_> {
     }
 
     fn glyph(&mut self, g: PhysicalGlyph, color: Color) {
+        // Texto oculto (marcadores): emoji colorido ignoraria a cor transparente.
+        if color.a() == 0 {
+            return;
+        }
         let Some(img) = self.cache.get_image(self.fs, g.cache_key) else { return };
         let x = self.ox + g.x + img.placement.left;
         let y = self.oy + g.y - img.placement.top;
@@ -935,6 +944,8 @@ struct Tab {
     title: String,
     words: usize,
     chars: usize,
+    /// Auto-pomodoro: segundos de timers corridos desde a última pausa.
+    timer_work: u32,
 }
 
 impl std::ops::Deref for Tab {
@@ -1192,6 +1203,7 @@ impl Tab {
             title: "Nova nota".to_string(),
             words: 0,
             chars: 0,
+            timer_work: 0,
         }
     }
 
@@ -1944,6 +1956,8 @@ struct Hits {
     checkboxes: Vec<(Rect, usize, usize)>,
     /// (retângulo, linha, índice do `▸`/`▾`)
     toggles: Vec<(Rect, usize, usize)>,
+    /// Timers de tarefas `⏱ 25m`: (retângulo, linha).
+    timers: Vec<(Rect, usize)>,
     /// (retângulo na tela, bloco, coluna)
     cols: Vec<(Rect, usize, usize)>,
     /// Divisores arrastáveis: (área de arraste, bloco, coluna à direita).
@@ -1964,6 +1978,9 @@ enum Deco {
     Rect { x: i32, y: i32, w: i32, h: i32, r: i32, c: Color },
     Line { x0: i32, y0: i32, x1: i32, y1: i32, t: i32, c: Color },
     Check { rect: Rect, checked: bool, line: usize, idx: usize },
+    /// Timer `⏱ 25m`: área clicável e trilho de progresso sob o texto
+    /// (`frac`: parte já corrida; `running`: rodando ou pausado).
+    Timer { rect: Rect, line: usize, track: (i32, i32, i32), frac: Option<f32>, running: bool },
 }
 
 struct Ui {
@@ -2407,6 +2424,7 @@ impl Ui {
         let mut page_grips: Vec<Rect> = Vec::new();
         let grip_hot = self.page_drag.is_some() || self.page_hover;
         let mut checkboxes = Vec::new();
+        let mut timers = Vec::new();
         let mut toggles = Vec::new();
         let mut cols = Vec::new();
         let mut col_divs = Vec::new();
@@ -2427,7 +2445,7 @@ impl Ui {
             }
             let is_cur = pi == cur_page;
             let focused = focused_any && is_cur;
-            let marks = (checkboxes.len(), toggles.len(), cols.len(), col_divs.len(), cells.len(), img_hits.len(), seg_hits.len());
+            let marks = (checkboxes.len(), toggles.len(), cols.len(), col_divs.len(), cells.len(), img_hits.len(), seg_hits.len(), timers.len());
             let tab: &mut Page = &mut note.pages[pi];
             if tab.metrics_key != (zoom, scale) {
                 tab.metrics_key = (zoom, scale);
@@ -2459,7 +2477,7 @@ impl Ui {
             let full = ((editor.x + ml - ox) as f32, (editor.right() - ml - ox) as f32);
             let row_lines: Vec<usize> = tab.img_rows.iter().map(|r| r.line).collect();
             let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift, &row_lines, full));
-            draw_decos(canvas, decos, ox, oy, &mut checkboxes, &mut toggles);
+            draw_decos(canvas, decos, ox, oy, &mut checkboxes, &mut toggles, &mut timers);
             // ---- colunas: sub-buffers no espaço da linha `:::` ----
             let sel = tab.editor.selection_bounds();
             let cursor = tab.editor.cursor();
@@ -2517,7 +2535,7 @@ impl Ui {
                     if !col.map.is_empty() {
                         let infos: Vec<&md::LineInfo> = col.map.iter().map(|&m| &tab.lines[m]).collect();
                         let decos = collect_decos(&col.buffer, &infos, font_px, col.w, scale, &col.map, &tab.line_shift, &[], (0.0, col.w));
-                        draw_decos(canvas, decos, x0, y0, &mut checkboxes, &mut toggles);
+                        draw_decos(canvas, decos, x0, y0, &mut checkboxes, &mut toggles, &mut timers);
                         if let (true, Some(sl)) = (focused, col.sub_line(cursor.line)) {
                             let sub = Cursor::new(sl, cursor.index);
                             if let Some((cx, cy)) = col.buffer.cursor_position(&sub) {
@@ -2666,7 +2684,7 @@ impl Ui {
                         // Marcadores de bloco (lista, tarefa, citação) do começo da linha.
                         let info = [&tab.lines[row.line]];
                         let decos = collect_decos(&seg.buffer, &info, font_px, text_w, scale, &[row.line], &[], &[], (0.0, text_w));
-                        draw_decos(canvas, decos, tx, ty, &mut checkboxes, &mut toggles);
+                        draw_decos(canvas, decos, tx, ty, &mut checkboxes, &mut toggles, &mut timers);
                     }
                     let hit_w = (seg.hit_end - seg.x).max(1.0) as i32;
                     seg_hits.push(SegHit { rect: Rect::new(tx, y, hit_w, row.h as i32), line: row.line, start: seg.start, ri, si, tx, ty });
@@ -2702,6 +2720,7 @@ impl Ui {
             // Só a página atual responde a cliques em caixas, imagens etc.
             if !is_cur {
                 checkboxes.truncate(marks.0);
+                timers.truncate(marks.7);
                 toggles.truncate(marks.1);
                 cols.truncate(marks.2);
                 col_divs.truncate(marks.3);
@@ -2753,7 +2772,19 @@ impl Ui {
         let (status, words, chars, page) = {
             let t = self.tab();
             let page = if t.pages.len() > 1 { format!("página {} de {}  ·  ", t.cur + 1, t.pages.len()) } else { String::new() };
-            (t.status.clone(), t.words, t.chars, page)
+            // Timer rodando nesta nota: contagem regressiva no lugar do status.
+            let now = agenda::now();
+            let timer = t.pages.iter().find_map(|p| {
+                p.lines.iter().enumerate().find_map(|(li, info)| match info.timer.as_ref().map(|t| t.state) {
+                    Some(agenda::TState::Run(sod)) => Some(format!(
+                        "⏱ {} · {}",
+                        agenda::fmt_left(agenda::resolve_clock(sod, now) - now),
+                        agenda::title_of_line(&p.line_text(li))
+                    )),
+                    _ => None,
+                })
+            });
+            (timer.unwrap_or_else(|| t.status.clone()), t.words, t.chars, page)
         };
         let counter = format!(
             "{page}{} {}  ·  {} {}",
@@ -2809,6 +2840,7 @@ impl Ui {
             tabs,
             tab_closes,
             checkboxes,
+            timers,
             toggles,
             cols,
             col_divs,
@@ -3227,7 +3259,8 @@ impl Ui {
 }
 
 /// Desenha decorações com deslocamento (ox, oy) e registra áreas clicáveis.
-fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxes: &mut Vec<(Rect, usize, usize)>, toggles: &mut Vec<(Rect, usize, usize)>) {
+#[allow(clippy::type_complexity)]
+fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxes: &mut Vec<(Rect, usize, usize)>, toggles: &mut Vec<(Rect, usize, usize)>, timers: &mut Vec<(Rect, usize)>) {
     for d in decos {
         match d {
             Deco::Tri { rect, open, line, idx } => {
@@ -3267,6 +3300,25 @@ fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxe
                     canvas.rounded_outline(r.x, r.y, r.w, r.h, radius, white(0xaa), BLACK);
                 }
                 checkboxes.push((r, line, idx));
+            }
+            Deco::Timer { rect, line, track: (x, y, w), frac, running } => {
+                // Rodando/pausado: pílula translúcida por cima do `⏱ 25m` que
+                // se enche da esquerda conforme o tempo passa. Parado: sublinhado
+                // apagado (dá para clicar).
+                let r = Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h);
+                if let Some(f) = frac {
+                    let (bg, fg) = if running { (white(0x1c), white(0x30)) } else { (white(0x10), white(0x18)) };
+                    canvas.rounded_rect(r.x, r.y, r.w, r.h, r.h / 2, bg);
+                    let fw = (r.w as f32 * f.clamp(0.0, 1.0)).round() as i32;
+                    let clip = canvas.clip();
+                    canvas.set_clip(Rect::new(r.x, r.y, fw, r.h).intersect(&clip));
+                    canvas.rounded_rect(r.x, r.y, r.w, r.h, r.h / 2, fg);
+                    canvas.set_clip(clip);
+                } else {
+                    let _ = running;
+                    canvas.rect(ox + x, oy + y, w, (rect.h / 16).max(1), white(0x30));
+                }
+                timers.push((Rect::new(ox + rect.x, oy + rect.y, rect.w, rect.h), line));
             }
         }
     }
@@ -3339,6 +3391,23 @@ fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32,
                     let cx = ((g0.x + g1.x + g1.w) / 2.0) as i32;
                     let cy = (line_y - font_px * 0.32) as i32;
                     out.push(Deco::Check { rect: Rect::new(cx - side / 2, cy - side / 2, side, side), checked, line: abs_line, idx });
+                }
+            }
+            if let Some(t) = &info.timer {
+                let g1 = run.glyphs.iter().find(|g| g.end == t.dur_end);
+                if let (Some(g0), Some(g1)) = (glyph_at(t.at), g1) {
+                    let (x0, x1) = (g0.x as i32, (g1.x + g1.w) as i32);
+                    let pad = (font_px * 0.3) as i32;
+                    let lpad = (font_px * 0.12) as i32;
+                    let rect = Rect::new(x0 - lpad, (line_y - font_px * 0.98) as i32, x1 - x0 + lpad + pad, (font_px * 1.3) as i32);
+                    let now = agenda::now();
+                    let total = t.secs.max(1) as f32;
+                    let (frac, running) = match t.state {
+                        agenda::TState::Run(sod) => (Some(1.0 - (agenda::resolve_clock(sod, now) - now).max(0) as f32 / total), true),
+                        agenda::TState::Pause(left) => (Some(1.0 - left as f32 / total), false),
+                        agenda::TState::Idle => (None, false),
+                    };
+                    out.push(Deco::Timer { rect, line: abs_line, track: (x0, (line_y + font_px * 0.2) as i32, x1 - x0), frac, running });
                 }
             }
             if map.is_empty() && matches!(info.block, Block::Table | Block::TableSep) {
@@ -3419,6 +3488,8 @@ struct App {
     blink_token: Option<RegistrationToken>,
     blink_until: Instant,
     autosave_token: Option<RegistrationToken>,
+    /// Relógio da agenda: 1 s com timer rodando, 30 s sem (eventos).
+    agenda_token: Option<RegistrationToken>,
     first_draw: bool,
     test_input: String,
 
@@ -3590,6 +3661,7 @@ fn main() {
         blink_token: None,
         blink_until: Instant::now(),
         autosave_token: None,
+        agenda_token: None,
         first_draw: true,
         test_input: String::new(),
         ui,
@@ -3614,6 +3686,7 @@ fn main() {
 
     // Banco completo de fontes só se alguma nota aberta precisar dele.
     app.ensure_fonts_for_tabs();
+    app.kick_agenda();
 
     // Notas mudadas fora do app (bot do Telegram, outro editor) → recarrega a aba.
     if let Some(f) = watch_notes(&app.ui.store.notes_dir) {
@@ -3923,6 +3996,341 @@ impl App {
             self.loop_handle.remove(t);
         }
         self.ui.save_all();
+    }
+
+    // ---------- agenda: timers de tarefas e avisos de eventos ----------
+
+    /// (Re)arma o relógio da agenda agora (ao iniciar/pausar um timer).
+    fn kick_agenda(&mut self) {
+        if let Some(t) = self.agenda_token.take() {
+            self.loop_handle.remove(t);
+        }
+        self.agenda_token = self
+            .loop_handle
+            .insert_source(Timer::from_duration(Duration::from_millis(50)), |_, _, app| {
+                TimeoutAction::ToDuration(app.agenda_tick())
+            })
+            .ok();
+    }
+
+    /// Um passo do relógio: encerra timers vencidos ou marcados, puxa o
+    /// próximo da fila e dá os avisos de eventos das notas abertas.
+    fn agenda_tick(&mut self) -> Duration {
+        let now = agenda::now();
+        let mut ended: Vec<(usize, usize, usize, bool, u32)> = Vec::new();
+        let mut running = false;
+        for (ti, tab) in self.ui.tabs.iter().enumerate() {
+            for (pi, page) in tab.pages.iter().enumerate() {
+                for (li, info) in page.lines.iter().enumerate() {
+                    let Some(t) = &info.timer else { continue };
+                    let agenda::TState::Run(sod) = t.state else { continue };
+                    let end = agenda::resolve_clock(sod, now);
+                    if matches!(info.block, Block::Task(true)) {
+                        let worked = (t.secs as i64 - (end - now)).clamp(0, t.secs as i64) as u32;
+                        ended.push((ti, pi, li, true, worked));
+                    } else if now >= end {
+                        ended.push((ti, pi, li, false, t.secs));
+                    } else {
+                        running = true;
+                    }
+                }
+            }
+        }
+        // De baixo para cima: inserir uma pausa não desloca os que faltam.
+        for &(ti, pi, li, done, worked) in ended.iter().rev() {
+            running |= self.timer_finish(ti, pi, li, done, worked);
+        }
+        self.event_alarms(now);
+        if running {
+            self.request_redraw();
+        }
+        Duration::from_secs(if running { 1 } else { 30 })
+    }
+
+    /// Avisos no PC dos eventos (`📅`) das notas abertas; o bot do Telegram
+    /// faz o mesmo para todas as notas, e a marca em comum evita repetir.
+    fn event_alarms(&mut self, now: i64) {
+        for tab in &self.ui.tabs {
+            for page in &tab.pages {
+                for li in 0..page.lines.len() {
+                    let text = page.line_text(li);
+                    if !text.contains(agenda::EVENT) || agenda::is_done(&text) {
+                        continue;
+                    }
+                    let Some(e) = agenda::parse_event(&text, now) else { continue };
+                    let title = agenda::title_of_line(&text);
+                    for (kind, at) in [("antes", e.when - agenda::EARLY_SECS), ("hora", e.when)] {
+                        if kind == "antes" && (!e.has_time || now >= e.when) {
+                            continue;
+                        }
+                        if now >= at && now - at < agenda::GRACE_SECS && agenda::claim(&format!("pc:{kind}:{}:{title}", e.when)) {
+                            let head = if kind == "antes" { "📅 Daqui a 10 minutos" } else { "📅 Agora" };
+                            agenda::notify(head, &format!("{title} · {}", agenda::fmt_when(e.when, e.has_time)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Troca o texto da linha `line` da página `pi` da aba `ti` (qualquer
+    /// página, não só a em edição), com desfazer e cursor preservado.
+    fn set_page_line(&mut self, ti: usize, pi: usize, line: usize, new: &str) {
+        let fp = self.ui.font_px();
+        let Ui { font_system, images, tabs, .. } = &mut self.ui;
+        let page = &mut tabs[ti].pages[pi];
+        let old = page.line_text(line);
+        if old == new {
+            return;
+        }
+        let cur = page.editor.cursor();
+        page.editor.start_change();
+        Self::replace_line(page, line, new);
+        let change = page.editor.finish_change();
+        if cur.line == line {
+            let mut i = if cur.index >= old.len() { new.len() } else { cur.index.min(new.len()) };
+            while !new.is_char_boundary(i) {
+                i -= 1;
+            }
+            page.editor.set_selection(Selection::None);
+            page.editor.set_cursor(Cursor::new(line, i));
+        } else {
+            page.editor.set_cursor(cur);
+        }
+        if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
+            page.undo.record(ch, true);
+        }
+        page.restyle(font_system, images, fp);
+        tabs[ti].on_text_changed();
+        self.schedule_autosave();
+        self.request_redraw();
+    }
+
+    /// Insere uma linha nova antes de `line` na página `pi` da aba `ti`.
+    fn insert_page_line(&mut self, ti: usize, pi: usize, line: usize, text: &str) {
+        let fp = self.ui.font_px();
+        let Ui { font_system, images, tabs, .. } = &mut self.ui;
+        let page = &mut tabs[ti].pages[pi];
+        let cur = page.editor.cursor();
+        page.editor.start_change();
+        page.editor.insert_at(Cursor::new(line, 0), &format!("{text}\n"), None);
+        let change = page.editor.finish_change();
+        page.editor.set_cursor(if cur.line >= line { Cursor::new(cur.line + 1, cur.index) } else { cur });
+        if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
+            page.undo.record(ch, true);
+        }
+        page.restyle(font_system, images, fp);
+        tabs[ti].on_text_changed();
+        self.schedule_autosave();
+        self.request_redraw();
+    }
+
+    fn timer_at(&self, ti: usize, pi: usize, line: usize) -> Option<(String, agenda::TimerMark)> {
+        let page = self.ui.tabs.get(ti)?.pages.get(pi)?;
+        page.lines.get(line).filter(|l| matches!(l.block, Block::Task(_)))?;
+        let text = page.line_text(line);
+        let t = agenda::parse_timer(&text)?;
+        Some((text, t))
+    }
+
+    fn timer_set(&mut self, ti: usize, pi: usize, line: usize, state: agenda::TState, warn: bool) {
+        if let Some((text, t)) = self.timer_at(ti, pi, line) {
+            let new = agenda::with_state(&text, &t, state, warn);
+            self.set_page_line(ti, pi, line, &new);
+        }
+    }
+
+    fn timer_start(&mut self, ti: usize, pi: usize, line: usize, secs: u32) {
+        let end = agenda::sec_of_day(agenda::now() + secs as i64);
+        self.timer_set(ti, pi, line, agenda::TState::Run(end), false);
+    }
+
+    /// Clique no `⏱`: inicia (pausando outro que esteja rodando na nota),
+    /// pausa ou retoma.
+    fn timer_click(&mut self, ti: usize, pi: usize, line: usize) {
+        let Some((_, t)) = self.timer_at(ti, pi, line) else { return };
+        if self.ui.tabs[ti].pages[pi].lines.get(line).is_some_and(|l| matches!(l.block, Block::Task(true))) {
+            return;
+        }
+        let now = agenda::now();
+        match t.state {
+            agenda::TState::Idle => {
+                for p in 0..self.ui.tabs[ti].pages.len() {
+                    for l in 0..self.ui.tabs[ti].pages[p].lines.len() {
+                        if let Some((_, o)) = self.timer_at(ti, p, l) {
+                            if let agenda::TState::Run(sod) = o.state {
+                                let left = (agenda::resolve_clock(sod, now) - now).max(1) as u32;
+                                self.timer_set(ti, p, l, agenda::TState::Pause(left), o.warn);
+                            }
+                        }
+                    }
+                }
+                self.timer_start(ti, pi, line, t.secs);
+                self.ui.tabs[ti].status = format!("⏱ {} iniciado", agenda::fmt_duration(t.secs));
+            }
+            agenda::TState::Run(sod) => {
+                let left = (agenda::resolve_clock(sod, now) - now).max(1) as u32;
+                self.timer_set(ti, pi, line, agenda::TState::Pause(left), t.warn);
+                self.ui.tabs[ti].status = "⏱ pausado".to_string();
+            }
+            agenda::TState::Pause(left) => {
+                self.timer_start(ti, pi, line, left);
+                self.ui.tabs[ti].status = "⏱ retomado".to_string();
+            }
+        }
+        self.kick_agenda();
+    }
+
+    /// Próximo timer parado da nota depois de (pi, line), de cima para baixo.
+    fn next_timer(&self, ti: usize, pi: usize, line: usize) -> Option<(usize, usize)> {
+        let tab = &self.ui.tabs[ti];
+        for p in pi..tab.pages.len() {
+            let from = if p == pi { line + 1 } else { 0 };
+            for (l, info) in tab.pages[p].lines.iter().enumerate().skip(from) {
+                if let (Block::Task(false), Some(t)) = (info.block, &info.timer) {
+                    if t.state == agenda::TState::Idle && !t.warn {
+                        return Some((p, l));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Fim de um timer: marcado a tempo (`done`) ou esgotado (⚠️ e aviso).
+    /// Puxa o próximo da fila, com uma pausa a cada hora de trabalho.
+    /// Devolve se algum timer ficou rodando.
+    fn timer_finish(&mut self, ti: usize, pi: usize, line: usize, done: bool, worked: u32) -> bool {
+        let Some((text, t)) = self.timer_at(ti, pi, line) else { return false };
+        let title = agenda::title_of_line(&text);
+        let rest = agenda::is_rest(&text);
+        let end = agenda::deadline(&t, agenda::now()).unwrap_or(0);
+        self.timer_set(ti, pi, line, agenda::TState::Idle, !done);
+        {
+            let tab = &mut self.ui.tabs[ti];
+            tab.timer_work = if rest { 0 } else { tab.timer_work + worked };
+        }
+        let mut next = self.next_timer(ti, pi, line);
+        if let Some((np, nl)) = next {
+            let next_text = self.ui.tabs[ti].pages[np].line_text(nl);
+            if !rest && !agenda::is_rest(&next_text) && self.ui.tabs[ti].timer_work >= agenda::WORK_BEFORE_REST {
+                let indent = &next_text[..next_text.len() - next_text.trim_start().len()];
+                let pause = format!("{indent}- [ ] {} {} {}", agenda::REST_TASK, agenda::TIMER, agenda::fmt_duration(agenda::REST_SECS));
+                self.insert_page_line(ti, np, nl, &pause);
+                self.ui.tabs[ti].timer_work = 0;
+            }
+            let secs = self.timer_at(ti, np, nl).map_or(0, |(_, t)| t.secs);
+            if secs > 0 {
+                self.timer_start(ti, np, nl, secs);
+            } else {
+                next = None;
+            }
+        }
+        let next_title = next.map(|(np, nl)| agenda::title_of_line(&self.ui.tabs[ti].pages[np].line_text(nl)));
+        let status = match (&next_title, done) {
+            (Some(n), _) => format!("⏱ agora: {n}"),
+            (None, true) => "⏱ fila concluída".to_string(),
+            (None, false) => format!("⚠️ tempo esgotado: {title}"),
+        };
+        self.ui.tabs[ti].status = status;
+        if !done && agenda::claim(&format!("pc:timer:{end}:{title}")) {
+            let body = match &next_title {
+                Some(n) => format!("{title}\nAgora: {n}"),
+                None => title.clone(),
+            };
+            agenda::notify("⏱ Tempo esgotado", &body);
+        } else if done && rest {
+            // fim da pausa marcado à mão: nada a avisar
+        }
+        next.is_some()
+    }
+
+    /// `/timer`: transforma a linha em tarefa com `⏱ 25m` (duração selecionada
+    /// para trocar digitando). Se já tem timer, só seleciona a duração.
+    fn add_timer(&mut self) {
+        let line = self.ui.tab().editor.cursor().line;
+        if !matches!(self.ui.tab().lines.get(line).map(|l| l.block), Some(Block::Task(_))) {
+            self.set_prefix(Some(md::Prefix::Task));
+        }
+        let text = self.ui.tab().line_text(line);
+        let (s, e) = match agenda::parse_timer(&text) {
+            Some(t) => {
+                let s = t.dur_end - text[..t.dur_end].bytes().rev().take_while(|b| b.is_ascii_alphanumeric()).count();
+                (s, t.dur_end)
+            }
+            None => {
+                // Tarefa ainda sem nome: o cursor fica antes do timer, para digitar o nome.
+                let empty = { let (ind, n, _) = md::line_prefix(&text); ind + n >= text.trim_end().len() };
+                let lead = if text.is_empty() || text.ends_with(' ') { "" } else { " " };
+                let ins = format!("{lead}{}{} 25m", if empty { " " } else { "" }, agenda::TIMER);
+                let (_, tab) = self.ui.ed();
+                tab.editor.start_change();
+                tab.editor.insert_at(Cursor::new(line, text.len()), &ins, None);
+                let change = tab.editor.finish_change();
+                self.after_change(change, true);
+                if empty {
+                    let (_, tab) = self.ui.ed();
+                    tab.editor.set_selection(Selection::None);
+                    tab.editor.set_cursor(Cursor::new(line, text.len() + lead.len()));
+                    self.request_redraw();
+                    return;
+                }
+                let e = text.len() + ins.len();
+                (e - 3, e)
+            }
+        };
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::Normal(Cursor::new(line, s)));
+        tab.editor.set_cursor(Cursor::new(line, e));
+        self.request_redraw();
+    }
+
+    /// `/evento`: acrescenta `📅 dd/mm 09:00` (amanhã) com a data selecionada.
+    fn add_event(&mut self) {
+        let line = self.ui.tab().editor.cursor().line;
+        let text = self.ui.tab().line_text(line);
+        if let Some(e) = agenda::parse_event(&text, agenda::now()) {
+            let s = e.at + agenda::EVENT.len() + 1;
+            let (_, tab) = self.ui.ed();
+            tab.editor.set_selection(Selection::Normal(Cursor::new(line, s.min(e.end))));
+            tab.editor.set_cursor(Cursor::new(line, e.end));
+            self.request_redraw();
+            return;
+        }
+        let when = agenda::fmt_when(agenda::now() + 86_400, false);
+        let date = when.split(' ').nth(1).unwrap_or("01/01").to_string();
+        let empty = { let (ind, n, _) = md::line_prefix(&text); ind + n >= text.trim_end().len() };
+        let lead = if text.is_empty() || text.ends_with(' ') { "" } else { " " };
+        let ins = format!("{lead}{}{} {date} 09:00", if empty { " " } else { "" }, agenda::EVENT);
+        let (_, tab) = self.ui.ed();
+        tab.editor.start_change();
+        tab.editor.insert_at(Cursor::new(line, text.len()), &ins, None);
+        let change = tab.editor.finish_change();
+        self.after_change(change, true);
+        if empty {
+            // Evento ainda sem nome: o cursor fica antes da data.
+            let (_, tab) = self.ui.ed();
+            tab.editor.set_selection(Selection::None);
+            tab.editor.set_cursor(Cursor::new(line, text.len() + lead.len()));
+            self.request_redraw();
+            return;
+        }
+        let e = text.len() + ins.len();
+        let (_, tab) = self.ui.ed();
+        tab.editor.set_selection(Selection::Normal(Cursor::new(line, e - "dd/mm 09:00".len())));
+        tab.editor.set_cursor(Cursor::new(line, e));
+        self.request_redraw();
+    }
+
+    /// Ação "Iniciar/pausar timer" (menu): na linha do cursor.
+    fn timer_toggle_here(&mut self) {
+        let (ti, pi) = (self.ui.active, self.ui.tab().cur);
+        let line = self.ui.tab().editor.cursor().line;
+        if self.timer_at(ti, pi, line).is_none() {
+            self.add_timer();
+        } else {
+            self.timer_click(ti, pi, line);
+        }
     }
 
     // ---------- edição ----------
@@ -4662,6 +5070,8 @@ impl App {
             "ul" => self.set_prefix(Some(md::Prefix::Bullet)),
             "ol" => self.set_prefix(Some(md::Prefix::Numbered)),
             "todo" => self.set_prefix(Some(md::Prefix::Task)),
+            "timer" => self.add_timer(),
+            "event" => self.add_event(),
             "toggle" => self.set_prefix(Some(md::Prefix::Toggle)),
             "quote" => self.set_prefix(Some(md::Prefix::Quote)),
             "hr" => self.insert_block("---\n", 1, 0),
@@ -5154,6 +5564,7 @@ impl App {
         }
         if touched {
             self.ensure_fonts_for_tabs();
+            self.kick_agenda();
             self.request_redraw();
         }
     }
@@ -5162,6 +5573,7 @@ impl App {
         self.flush();
         self.ui.open_in_tab(Some(path));
         self.ensure_fonts_for_tabs();
+        self.kick_agenda();
         self.ui.persist_state();
         self.wake_cursor();
         self.request_redraw();
@@ -5253,6 +5665,8 @@ impl App {
             "ul" => self.set_prefix(Some(md::Prefix::Bullet)),
             "ol" => self.set_prefix(Some(md::Prefix::Numbered)),
             "todo" => self.set_prefix(Some(md::Prefix::Task)),
+            "timer" => self.timer_toggle_here(),
+            "event" => self.add_event(),
             "quote" => self.set_prefix(Some(md::Prefix::Quote)),
             "dup" => self.duplicate_line(),
             "delline" => self.delete_line(),
@@ -6213,6 +6627,7 @@ impl App {
         v.extend(h.tabs.iter().map(|(r, _)| *r));
         v.extend(h.tab_closes.iter().map(|(r, _)| *r));
         v.extend(h.checkboxes.iter().map(|(r, _, _)| *r));
+        v.extend(h.timers.iter().map(|(r, _)| *r));
         v.extend(h.toggles.iter().map(|(r, _, _)| *r));
         if self.ui.list_open {
             v.extend(h.rows.iter().map(|(r, _)| *r));
@@ -6450,6 +6865,7 @@ impl App {
         let tab_hit = h.tabs.iter().find(|(r, _)| r.contains(px, py)).map(|(_, i)| *i);
         let tab_close_hit = h.tab_closes.iter().find(|(r, _)| r.contains(px, py)).map(|(_, i)| *i);
         let checkbox_hit = h.checkboxes.iter().find(|(r, _, _)| r.contains(px, py)).map(|(_, l, i)| (*l, *i));
+        let timer_hit = h.timers.iter().find(|(r, _)| r.contains(px, py)).map(|(_, l)| *l);
         let toggle_hit = h.toggles.iter().find(|(r, _, _)| r.contains(px, py)).map(|(_, l, i)| (*l, *i));
         if self.ui.slash.is_some() {
             self.ui.slash = None;
@@ -6511,6 +6927,11 @@ impl App {
                 if let Some(seat) = &self.seat {
                     self.window.move_(seat, serial);
                 }
+                return;
+            }
+            if let Some(line) = timer_hit.filter(|_| button == BTN_LEFT) {
+                let (ti, pi) = (self.ui.active, self.ui.tab().cur);
+                self.timer_click(ti, pi, line);
                 return;
             }
             if let Some((line, idx)) = checkbox_hit {
