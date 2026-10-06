@@ -23,6 +23,8 @@ pub struct State {
     pub width: u32,
     pub height: u32,
     pub zoom: i32,
+    /// Largura das páginas do editor (em).
+    pub page_em: f32,
 }
 
 pub struct Store {
@@ -114,7 +116,7 @@ impl Store {
     }
 
     pub fn load_state(&self) -> State {
-        let mut st = State { last: None, tabs: Vec::new(), active: 0, width: 760, height: 540, zoom: 15 };
+        let mut st = State { last: None, tabs: Vec::new(), active: 0, width: 760, height: 540, zoom: 15, page_em: 38.0 };
         if let Ok(s) = fs::read_to_string(&self.state_path) {
             for line in s.lines() {
                 let Some((k, v)) = line.split_once('=') else { continue };
@@ -126,6 +128,7 @@ impl Store {
                     "width" => st.width = v.parse().unwrap_or(st.width),
                     "height" => st.height = v.parse().unwrap_or(st.height),
                     "zoom" => st.zoom = v.parse().unwrap_or(st.zoom),
+                    "page" => st.page_em = v.parse().unwrap_or(st.page_em),
                     _ => {}
                 }
             }
@@ -137,13 +140,14 @@ impl Store {
 
     pub fn save_state(&self, st: &State) {
         let body = format!(
-            "last={}\ntabs={}\nactive={}\nwidth={}\nheight={}\nzoom={}\n",
+            "last={}\ntabs={}\nactive={}\nwidth={}\nheight={}\nzoom={}\npage={}\n",
             st.last.as_deref().unwrap_or(""),
             st.tabs.join(","),
             st.active,
             st.width,
             st.height,
-            st.zoom
+            st.zoom,
+            st.page_em
         );
         let _ = fs::write(&self.state_path, body);
     }

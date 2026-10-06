@@ -108,6 +108,12 @@ Também dá para digitar direto: `- ` vira ponto, `1. ` numera, `- [ ] ` vira
 checkbox (clique nele para marcar), `> ` cita, `---` numa linha vira
 separador, três crases abrem/fecham um bloco de código.
 
+**Divisor da tela inteira:** `___` (três sublinhados) é um divisor que vai
+de uma margem à outra da janela, passando por cima das páginas ao lado, e não
+só até o fim da página. `Ctrl+-` insere um abaixo da linha atual; numa linha
+que já é divisor, `Ctrl+-` alterna entre `---` (largura da página) e `___`
+(tela inteira). Em outros leitores de Markdown, `___` é um divisor comum.
+
 - **Enter** no fim de um item continua a lista (ponto, número seguinte, checkbox).
 - **Enter** num item vazio encerra a lista.
 - **Tab / Shift+Tab** fora de tabela: indenta/desindenta (sub-itens).
@@ -297,6 +303,34 @@ para outra família.
 | `Esc` | Limpa a seleção; sem seleção, fecha o app |
 | Duplo clique / triplo clique | Seleciona palavra / linha |
 
+### Páginas lado a lado
+
+A largura da página é fixa (a medida de leitura), mas a nota pode ter várias
+páginas lado a lado, cada uma com o próprio texto, rolagem e desfazer:
+
+- **Criar:** o botão `+` à direita da última página, `Ctrl+Alt+N` (página
+  nova logo depois da atual) ou `/página` no menu `/`.
+- **Navegar:** clique numa página para escrever nela; `Alt+←` / `Alt+→` vão
+  para a página anterior/seguinte; a roda do mouse rola a página que está sob
+  ele; `Shift+roda` ou o deslize horizontal do touchpad andam entre as páginas.
+- **Largura:** arraste a borda direita de qualquer página (o cursor vira a
+  seta de ajuste); todas as páginas mudam juntas, com mínimo de 20 em
+  (~37 caracteres). Duplo clique na borda volta ao padrão (38 em).
+- **Apagar:** numa página vazia, `Backspace` a remove.
+- No arquivo, as páginas ficam separadas por uma linha `<!-- página -->`
+  (comentário HTML, invisível em outros leitores de Markdown).
+
+### Menu do botão direito
+
+Clique com o botão direito no texto (com ou sem seleção): abre uma caixa com
+as ações possíveis e uma busca no topo. Digite para filtrar (sem acento,
+qualquer ordem de palavras), escolha com ↑/↓ e Enter ou com o mouse; Esc ou
+um clique fora fecham. Com seleção aparecem copiar, recortar, negrito,
+itálico, tachado, código, link, cor, remover cor, MAIÚSCULAS, minúsculas e
+Primeira Maiúscula; sempre aparecem colar, selecionar tudo, títulos, listas,
+tarefa, citação, duplicar/apagar linha, emoji, divisor da tela inteira e
+página ao lado. Clicar fora da seleção move o cursor antes de abrir o menu.
+
 ### Notas e abas
 
 - `Ctrl+Shift+N` duplica a nota atual numa aba nova (vira outro arquivo ao
@@ -314,11 +348,14 @@ para outra família.
 | `Ctrl+Z` / `Ctrl+Shift+Z` / `Ctrl+Y` | Desfazer / refazer |
 | `Ctrl+A/C/X/V` | Selecionar tudo, copiar, recortar, colar |
 | `Ctrl+←/→`, `Ctrl+Backspace/Delete` | Mover/apagar por palavra |
-| `Ctrl+=` / `Ctrl+-` / `Ctrl+0` | Zoom do texto |
+| `Ctrl+=` / `Ctrl+Shift+-` / `Ctrl+0`, `Ctrl+roda`, `Ctrl+` `+`/`-` do teclado numérico | Zoom do texto |
+| `Ctrl+-` | Divisor da tela inteira (`___`) |
+| `Alt+←` / `Alt+→`, `Ctrl+Alt+N` | Página anterior / seguinte, página nova |
 | `Esc` (sem seleção), `Ctrl+Q` | Sair (salva tudo antes) |
 
 Mouse: clique, arraste, duplo clique (palavra), triplo (linha), roda para rolar,
-clique no checkbox alterna, botão do meio cola a seleção primária.
+clique no checkbox alterna, botão do meio cola a seleção primária, botão
+direito abre o menu de ações.
 
 O título da nota (na aba e na lista) é a primeira linha não vazia.
 
@@ -422,9 +459,9 @@ que a interface tenha um ritmo único. As regras e de onde vêm:
 |---|---|---|
 | Grade de espaçamento | 4 px; espaços preferem múltiplos de 8 (8, 16, 24, 32) | Convenção dos design systems (Material, Carbon, Fluent, Polaris): múltiplos de 8 dividem exatamente as densidades 1×, 1.5×, 2× e 3× de tela, e a escala discreta força decisões consistentes ([Spec: 8-pt grid](https://spec.fm/specifics/8-pt-grid), [designsystems.com](https://www.designsystems.com/space-grids-and-layouts/)). A proximidade agrupa: elementos próximos são lidos como um grupo (lei da proximidade da Gestalt). |
 | Escala tipográfica | 1.25 (terça maior): corpo 1, H3 1.25, H2 1.5625, H1 2.0 | Escalas modulares derivadas de intervalos musicais, por Bringhurst (*The Elements of Typographic Style*); a terça maior dá incrementos moderados, adequados a interfaces ([Spec: type scale](https://spec.fm/specifics/type-scale), [UX-Republic](https://www.ux-republic.com/en/practical-guide-to-creating-a-modular-scale-type-for-your-interfaces/)). |
-| Tamanho do corpo | 16 px por padrão (`Ctrl+=`/`Ctrl+-` ajustam, 10–40) | A leitura fluente cobre uma faixa ampla de tamanhos; a legibilidade e a compreensão na tela melhoram até ~18 pt ([Legge & Bigelow 2011](https://pubmed.ncbi.nlm.nih.gov/21828237/); [Rello et al. 2016](https://www.researchgate.net/publication/301935601_Make_It_Big_The_Effect_of_Font_Size_and_Line_Spacing_on_Online_Readability)). |
+| Tamanho do corpo | 16 px por padrão (`Ctrl+=`/`Ctrl+roda` ajustam, 10–40) | A leitura fluente cobre uma faixa ampla de tamanhos; a legibilidade e a compreensão na tela melhoram até ~18 pt ([Legge & Bigelow 2011](https://pubmed.ncbi.nlm.nih.gov/21828237/); [Rello et al. 2016](https://www.researchgate.net/publication/301935601_Make_It_Big_The_Effect_of_Font_Size_and_Line_Spacing_on_Online_Readability)). |
 | Entrelinha | corpo 1.5; títulos 1.25; rótulos 1.35 | 1.5× dá leitura mais precisa e rápida que 1× na tela ([Ling & van Schaik 2007](https://www.sciencedirect.com/science/article/abs/pii/S0141938207000133)); Rello et al. recomendam não passar muito disso. Títulos curtos e grandes pedem entrelinha menor. |
-| Medida (largura da coluna) | máx. 38 em ≈ 70 caracteres; coluna alinhada à esquerda (tabelas podem ir até a margem direita) | 55 caracteres por linha deram a melhor compreensão na tela ([Dyson & Haselgrove 2001](https://www.sciencedirect.com/science/article/abs/pii/S1071581901904586)); Bringhurst recomenda 45–75, Butterick 45–90 ([Practical Typography](https://practicaltypography.com/line-length.html)). |
+| Medida (largura da coluna) | 38 em ≈ 70 caracteres por padrão, ajustável arrastando a borda da página (mín. 20 em); coluna alinhada à esquerda (tabelas podem ir até a margem direita na última página) | 55 caracteres por linha deram a melhor compreensão na tela ([Dyson & Haselgrove 2001](https://www.sciencedirect.com/science/article/abs/pii/S1071581901904586)); Bringhurst recomenda 45–75, Butterick 45–90 ([Practical Typography](https://practicaltypography.com/line-length.html)). |
 | Tracking | fórmula do autor da Inter: `-0,0223 + 0,185·e^(−0,1745·tamanho)` em | [Inter dynamic metrics](https://d.rsms.me/inter-website/v3/dynmetrics/): ligeiramente mais aberto em tamanhos pequenos, mais fechado em títulos. |
 | Alvos de clique | botões 32 px, linhas de lista 48 px, abas 32 px de altura, fechar aba 20 px com folga | WCAG 2.2 exige ≥ 24×24 px ([SC 2.5.8](https://www.w3.org/WAI/WCAG22/Understanding/target-size-minimum.html)); Apple e Material usam 44 pt / 48 dp para toque; Parhi, Karlson & Bederson mediram ~9 mm para o polegar ([2006](https://www.microsoft.com/en-us/research/wp-content/uploads/2006/01/parhi-mobileHCI06.pdf)). |
 | Cantos | 6 / 8 / 12 px (item, botão ou aba, painel) | Raio cresce com o tamanho do componente (Material 3: pequeno 8, médio 12). |

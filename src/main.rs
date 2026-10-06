@@ -120,6 +120,11 @@ const HEADING_LEADING: f32 = 1.25;
 const UI_LEADING: f32 = 1.35;
 /// Medida (largura da coluna de texto) em em: ~70 caracteres na Inter.
 const MEASURE_EM: f32 = 38.0;
+/// Página mais estreita permitida ao arrastar a borda (em).
+const PAGE_MIN_EM: f32 = 20.0;
+const PAGE_MAX_EM: f32 = 160.0;
+/// Espaço entre páginas lado a lado (em).
+const PAGE_GAP_EM: f32 = 2.5;
 const HEADER_H: f32 = 48.0;
 const FOOTER_H: f32 = 32.0;
 const BUTTON: f32 = 32.0;
@@ -193,7 +198,7 @@ fn tracking(size_px: f32) -> f32 {
 }
 
 /// Menu `/`: (rótulo, chave, palavras para busca).
-const SLASH_ITEMS: [(&str, &str, &str); 16] = [
+const SLASH_ITEMS: [(&str, &str, &str); 18] = [
     ("Título 1", "h1", "titulo heading h1"),
     ("Título 2", "h2", "titulo heading h2"),
     ("Título 3", "h3", "titulo heading h3"),
@@ -204,6 +209,8 @@ const SLASH_ITEMS: [(&str, &str, &str); 16] = [
     ("Toggle", "toggle", "toggle dobra esconder recolher"),
     ("Citação", "quote", "citacao quote"),
     ("Divisor", "hr", "divisor linha separador"),
+    ("Divisor da tela inteira", "hrfull", "divisor linha separador tela inteira master largura"),
+    ("Página ao lado", "page", "pagina nova lado coluna horizontal"),
     ("Tabela", "table", "tabela table"),
     ("2 colunas", "col2", "colunas 2 duas"),
     ("3 colunas", "col3", "colunas 3 tres"),
@@ -211,6 +218,53 @@ const SLASH_ITEMS: [(&str, &str, &str); 16] = [
     ("Imagem", "image", "imagem foto figura image"),
     ("Bloco de código", "code", "codigo code bloco"),
 ];
+
+/// Ações do menu do botão direito: (rótulo, atalho, chave, palavras de
+/// busca, só com seleção).
+const CTX_ITEMS: [(&str, &str, &str, &str, bool); 27] = [
+    ("Copiar", "Ctrl+C", "copy", "copiar copy", true),
+    ("Recortar", "Ctrl+X", "cut", "recortar cortar cut", true),
+    ("Colar", "Ctrl+V", "paste", "colar paste", false),
+    ("Selecionar tudo", "Ctrl+A", "all", "selecionar tudo todo all", false),
+    ("Negrito", "Ctrl+B", "bold", "negrito bold forte", true),
+    ("Itálico", "Ctrl+I", "italic", "italico italic enfase", true),
+    ("Tachado", "Ctrl+Shift+S", "strike", "tachado riscado strike", true),
+    ("Código", "Ctrl+E", "code", "codigo code mono", true),
+    ("Link", "Ctrl+K", "link", "link url endereco", true),
+    ("Cor…", "Ctrl+Shift+C", "color", "cor color colorir", true),
+    ("Remover cor", "", "nocolor", "remover cor tirar limpar", true),
+    ("MAIÚSCULAS", "", "upper", "maiusculas caixa alta upper", true),
+    ("minúsculas", "", "lower", "minusculas caixa baixa lower", true),
+    ("Primeira Maiúscula", "", "title", "primeira maiuscula titulo capitalizar", true),
+    ("Título 1", "Ctrl+Shift+1", "h1", "titulo heading h1", false),
+    ("Título 2", "Ctrl+Shift+2", "h2", "titulo heading h2", false),
+    ("Título 3", "Ctrl+Shift+3", "h3", "titulo heading h3", false),
+    ("Texto normal", "Ctrl+Shift+0", "p", "texto normal paragrafo", false),
+    ("Lista", "Ctrl+Shift+8", "ul", "lista pontos bullet", false),
+    ("Lista numerada", "Ctrl+Shift+7", "ol", "lista numerada numeros", false),
+    ("Tarefa", "Ctrl+Shift+9", "todo", "tarefa checkbox todo caixa", false),
+    ("Citação", "Ctrl+Shift+Q", "quote", "citacao quote", false),
+    ("Duplicar linha", "Ctrl+D", "dup", "duplicar linha copiar", false),
+    ("Apagar linha", "Ctrl+Shift+K", "delline", "apagar linha excluir deletar", false),
+    ("Emoji", "Ctrl+.", "emoji", "emoji carinha", false),
+    ("Divisor da tela inteira", "Ctrl+-", "hrfull", "divisor regua linha tela inteira", false),
+    ("Página ao lado", "Ctrl+Alt+N", "page", "pagina nova lado", false),
+];
+
+/// Menu do botão direito: busca no topo, setas/mouse para escolher.
+struct Ctx {
+    x: i32,
+    y: i32,
+    query: String,
+    sel: usize,
+    /// Primeira linha visível (a lista rola com as setas).
+    top: usize,
+    /// Havia seleção quando o menu abriu.
+    has_sel: bool,
+    /// Linhas desenhadas: (retângulo, índice em CTX_ITEMS).
+    rows: Vec<(Rect, usize)>,
+    panel: Rect,
+}
 
 struct Slash {
     line: usize,
@@ -283,6 +337,7 @@ enum PasteKind {
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_MIDDLE: u32 = 0x112;
+const BTN_RIGHT: u32 = 0x111;
 
 // ---------- tema: só preto e branco (branco com alpha para tons) ----------
 const BLACK: Color = rgb(0, 0, 0);
@@ -375,6 +430,26 @@ static EMOJI: OnceLock<Vec<GlyphEntry>> = OnceLock::new();
 static SYMBOLS: OnceLock<Vec<GlyphEntry>> = OnceLock::new();
 const EMOJI_GROUPS: [&str; 10] = ["Sorrisos e emoção", "Pessoas e corpo", "Componente", "Animais e natureza", "Comida e bebida", "Viagem e lugares", "Atividades", "Objetos", "Símbolos", "Bandeiras"];
 const SYMBOL_GROUPS: [&str; 8] = ["Setas", "Marcas", "Formas", "Matemática", "Moedas", "Pontuação", "Caixas", "Diversos"];
+
+/// "primeira maiúscula": cada palavra com a inicial maiúscula e o resto minúsculo.
+fn title_case(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut start = true;
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            if start {
+                out.extend(c.to_uppercase());
+            } else {
+                out.extend(c.to_lowercase());
+            }
+            start = false;
+        } else {
+            out.push(c);
+            start = true;
+        }
+    }
+    out
+}
 
 fn fold(s: &str) -> String {
     s.chars()
@@ -836,9 +911,19 @@ fn make_font_system(mut db: fontdb::Database) -> FontSystem {
 // Aba: um editor + estado de uma nota.
 // =====================================================================
 
+/// Linha que separa páginas no arquivo (comentário HTML: invisível em
+/// outros leitores de Markdown).
+const PAGE_BREAK: &str = "<!-- página -->";
+
+/// Uma nota aberta: uma ou mais páginas lado a lado, salvas num só arquivo.
 struct Tab {
-    editor: Editor<'static>,
-    undo: Undo,
+    pages: Vec<Page>,
+    /// Página em edição.
+    cur: usize,
+    /// Rolagem horizontal entre páginas (px).
+    hscroll: f32,
+    /// Trazer a página atual para a vista no próximo desenho.
+    reveal: bool,
     path: Option<PathBuf>,
     saved_text: String,
     /// mtime do arquivo na última leitura/gravação feita pelo app: outra
@@ -850,6 +935,25 @@ struct Tab {
     title: String,
     words: usize,
     chars: usize,
+}
+
+impl std::ops::Deref for Tab {
+    type Target = Page;
+    fn deref(&self) -> &Page {
+        &self.pages[self.cur]
+    }
+}
+
+impl std::ops::DerefMut for Tab {
+    fn deref_mut(&mut self) -> &mut Page {
+        &mut self.pages[self.cur]
+    }
+}
+
+/// Uma página: editor, desfazer e layout próprios.
+struct Page {
+    editor: Editor<'static>,
+    undo: Undo,
     editor_size: (f32, f32),
     /// Largura disponível para tabelas: da coluna de texto até a margem direita.
     wide_w: f32,
@@ -1074,6 +1178,144 @@ impl ColText {
 }
 
 impl Tab {
+    fn new(font_system: &mut FontSystem, font_px: f32) -> Tab {
+        Tab {
+            pages: vec![Page::new(font_system, font_px)],
+            cur: 0,
+            hscroll: 0.0,
+            reveal: false,
+            path: None,
+            saved_text: String::new(),
+            disk_mtime: None,
+            conflict: false,
+            status: "nova nota".to_string(),
+            title: "Nova nota".to_string(),
+            words: 0,
+            chars: 0,
+        }
+    }
+
+    /// Texto da nota inteira: páginas separadas por `PAGE_BREAK`.
+    fn text(&self) -> String {
+        let parts: Vec<String> = self.pages.iter().map(Page::page_text).collect();
+        parts.join(&format!("\n{PAGE_BREAK}\n"))
+    }
+
+    fn update_derived(&mut self, text: &str) {
+        let t = store::title_of(text);
+        self.title = if t.is_empty() { "Nova nota".to_string() } else { t };
+        self.words = text.split_whitespace().count();
+        self.chars = text.chars().count();
+    }
+
+    fn on_text_changed(&mut self) {
+        let text = self.text();
+        self.update_derived(&text);
+        self.status = "editando…".to_string();
+    }
+
+    fn is_empty_new(&self) -> bool {
+        self.path.is_none() && self.text().trim().is_empty()
+    }
+
+    fn load(&mut self, text: &str, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
+        let text = &md::format_tables_in_text(text);
+        // Linhas agrupadas entre os separadores: o inverso exato de `text()`.
+        let mut groups: Vec<Vec<&str>> = vec![Vec::new()];
+        for line in text.split('\n') {
+            if line.trim() == PAGE_BREAK {
+                groups.push(Vec::new());
+            } else {
+                groups.last_mut().expect("sempre há uma página").push(line);
+            }
+        }
+        let parts: Vec<String> = groups.iter().map(|g| g.join("\n")).collect();
+        while self.pages.len() < parts.len() {
+            self.pages.push(Page::new(fs, font_px));
+        }
+        self.pages.truncate(parts.len());
+        for (pg, t) in self.pages.iter_mut().zip(&parts) {
+            pg.metrics_key = (0, 0);
+            pg.set_text(t, fs, images, font_px);
+        }
+        self.cur = self.cur.min(self.pages.len() - 1);
+        self.saved_text = text.to_string();
+        self.update_derived(text);
+    }
+
+    /// Salva se mudou. Nota esvaziada vai para a lixeira. Devolve se gravou.
+    fn save(&mut self, store: &Store) -> bool {
+        let text = self.text();
+        if text == self.saved_text {
+            return false;
+        }
+        if text.trim().is_empty() {
+            if let Some(p) = self.path.take() {
+                let _ = store.trash(&p);
+            }
+            self.saved_text = text;
+            self.status = "nova nota".to_string();
+            return true;
+        }
+        let path = match &self.path {
+            Some(p) => p.clone(),
+            None => {
+                let p = store.new_path();
+                self.path = Some(p.clone());
+                p
+            }
+        };
+        match store.write(&path, &text) {
+            Ok(()) => {
+                self.disk_mtime = file_mtime(&path);
+                self.saved_text = text;
+                self.status = if std::mem::take(&mut self.conflict) {
+                    format!("salvo · {} · a versão de fora está na lixeira", store::now_hm())
+                } else {
+                    format!("salvo · {}", store::now_hm())
+                };
+            }
+            Err(e) => self.status = format!("erro ao salvar: {e}"),
+        }
+        true
+    }
+}
+
+impl Page {
+    fn new(font_system: &mut FontSystem, font_px: f32) -> Page {
+        let mut b = Buffer::new(font_system, Metrics::new(font_px, body_lh(font_px)));
+        b.set_wrap(Wrap::WordOrGlyph);
+        b.set_tab_width(4);
+        Page {
+            editor: Editor::new(b),
+            undo: Undo::default(),
+            editor_size: (0.0, 0.0),
+            wide_w: 0.0,
+            metrics_key: (0, 0),
+            lines: Vec::new(),
+            last_line: 0,
+            preview: None,
+            columns: Vec::new(),
+            tables: Vec::new(),
+            line_shift: Vec::new(),
+            inline_imgs: Vec::new(),
+            img_rows: Vec::new(),
+        }
+    }
+
+    /// Troca o texto da página (cursor no fim, histórico limpo).
+    fn set_text(&mut self, text: &str, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
+        let attrs = Attrs::new().family(Family::SansSerif).color(WHITE);
+        self.editor.with_buffer_mut(|b| b.set_text(text, &attrs, Shaping::Advanced, None));
+        let end = self.end_cursor();
+        self.editor.set_selection(Selection::None);
+        self.editor.set_cursor(end);
+        self.editor.set_redraw(true);
+        self.undo.clear();
+        self.last_line = end.line;
+        self.restyle(fs, images, font_px);
+    }
+
     /// Coluna que contém a linha `line`, se houver: (bloco, coluna).
     fn column_of(&self, line: usize) -> Option<(usize, usize)> {
         for (bi, b) in self.columns.iter().enumerate() {
@@ -1107,36 +1349,8 @@ impl Tab {
             && b.cols.iter().all(|c| c.map.len() <= 1)
     }
 
-    fn new(font_system: &mut FontSystem, font_px: f32) -> Tab {
-        let mut b = Buffer::new(font_system, Metrics::new(font_px, body_lh(font_px)));
-        b.set_wrap(Wrap::WordOrGlyph);
-        b.set_tab_width(4);
-        Tab {
-            editor: Editor::new(b),
-            undo: Undo::default(),
-            path: None,
-            saved_text: String::new(),
-            disk_mtime: None,
-            conflict: false,
-            status: "nova nota".to_string(),
-            title: "Nova nota".to_string(),
-            words: 0,
-            chars: 0,
-            editor_size: (0.0, 0.0),
-            wide_w: 0.0,
-            metrics_key: (0, 0),
-            lines: Vec::new(),
-            last_line: 0,
-            preview: None,
-            columns: Vec::new(),
-            tables: Vec::new(),
-            line_shift: Vec::new(),
-            inline_imgs: Vec::new(),
-            img_rows: Vec::new(),
-        }
-    }
 
-    fn text(&self) -> String {
+    fn page_text(&self) -> String {
         self.editor.with_buffer(|b| {
             let mut s = String::new();
             for (i, l) in b.lines.iter().enumerate() {
@@ -1164,37 +1378,9 @@ impl Tab {
         })
     }
 
-    fn update_derived(&mut self, text: &str) {
-        let t = store::title_of(text);
-        self.title = if t.is_empty() { "Nova nota".to_string() } else { t };
-        self.words = text.split_whitespace().count();
-        self.chars = text.chars().count();
-    }
 
-    fn on_text_changed(&mut self) {
-        let text = self.text();
-        self.update_derived(&text);
-        self.status = "editando…".to_string();
-    }
 
-    fn is_empty_new(&self) -> bool {
-        self.path.is_none() && self.text().trim().is_empty()
-    }
 
-    fn load(&mut self, text: &str, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
-        let text = &md::format_tables_in_text(text);
-        let attrs = Attrs::new().family(Family::SansSerif).color(WHITE);
-        self.editor.with_buffer_mut(|b| b.set_text(text, &attrs, Shaping::Advanced, None));
-        let end = self.end_cursor();
-        self.editor.set_selection(Selection::None);
-        self.editor.set_cursor(end);
-        self.editor.set_redraw(true);
-        self.undo.clear();
-        self.saved_text = text.to_string();
-        self.last_line = end.line;
-        self.update_derived(text);
-        self.restyle(fs, images, font_px);
-    }
 
     /// Reaplica os estilos Markdown em todas as linhas.
     fn restyle(&mut self, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
@@ -1695,42 +1881,6 @@ impl Tab {
         }
     }
 
-    /// Salva se mudou. Nota esvaziada vai para a lixeira. Devolve se gravou.
-    fn save(&mut self, store: &Store) -> bool {
-        let text = self.text();
-        if text == self.saved_text {
-            return false;
-        }
-        if text.trim().is_empty() {
-            if let Some(p) = self.path.take() {
-                let _ = store.trash(&p);
-            }
-            self.saved_text = text;
-            self.status = "nova nota".to_string();
-            return true;
-        }
-        let path = match &self.path {
-            Some(p) => p.clone(),
-            None => {
-                let p = store.new_path();
-                self.path = Some(p.clone());
-                p
-            }
-        };
-        match store.write(&path, &text) {
-            Ok(()) => {
-                self.disk_mtime = file_mtime(&path);
-                self.saved_text = text;
-                self.status = if std::mem::take(&mut self.conflict) {
-                    format!("salvo · {} · a versão de fora está na lixeira", store::now_hm())
-                } else {
-                    format!("salvo · {}", store::now_hm())
-                };
-            }
-            Err(e) => self.status = format!("erro ao salvar: {e}"),
-        }
-        true
-    }
 }
 
 /// Estilo de um trecho. Fora da linha em edição, marcadores (`**`, `#`, URL
@@ -1801,6 +1951,12 @@ struct Hits {
     cells: Vec<CellHit>,
     segs: Vec<SegHit>,
     images: Vec<ImgHit>,
+    /// Área de cada página visível (para clicar e rolar nela).
+    pages: Vec<(Rect, usize)>,
+    /// Alças da borda direita das páginas.
+    page_grips: Vec<Rect>,
+    /// Botão "+" depois da última página.
+    page_add: Rect,
 }
 
 enum Deco {
@@ -1833,6 +1989,12 @@ struct Ui {
     col_hover: Option<(usize, usize)>,
     /// Arraste de um divisor de colunas em andamento.
     col_drag: Option<ColDrag>,
+    /// Largura das páginas (em da fonte do corpo).
+    page_em: f32,
+    ctx: Option<Ctx>,
+    /// Arraste da borda da página: (x inicial, largura inicial em px).
+    page_drag: Option<(i32, f32)>,
+    page_hover: bool,
     /// Imagem selecionada (linha, início do marcador): borda fina, sem cursor de texto.
     img_sel: Option<(usize, usize)>,
     /// Imagem sob o mouse (mesma chave).
@@ -1871,9 +2033,12 @@ impl Ui {
     }
 
     /// Editor da aba ativa junto com o sistema de fontes (campos distintos).
-    fn ed(&mut self) -> (&mut FontSystem, &mut Tab) {
+    /// Fontes + página em edição da aba ativa.
+    fn ed(&mut self) -> (&mut FontSystem, &mut Page) {
         let Ui { font_system, tabs, active, .. } = self;
-        (font_system, &mut tabs[*active])
+        let tab = &mut tabs[*active];
+        let cur = tab.cur;
+        (font_system, &mut tab.pages[cur])
     }
 
     /// Reaplica estilos na aba ativa (fontes, imagens e zoom atuais).
@@ -1958,6 +2123,7 @@ impl Ui {
             width: self.width,
             height: self.height,
             zoom: self.zoom,
+            page_em: self.page_em,
         });
     }
 
@@ -2207,16 +2373,39 @@ impl Ui {
         let ml = self.px(TEXT_MARGIN_X);
         let mt = self.px(TEXT_MARGIN_TOP);
         let font_px = self.font_px();
-        // Medida limitada (~70 caracteres) e coluna centralizada em janelas largas.
-        let measure = (MEASURE_EM * font_px).round() as i32;
+        // Largura da página (ajustável arrastando a borda; ~70 caracteres por padrão).
+        let measure = (self.page_em * font_px).round() as i32;
         let text_w = (editor.w - 2 * ml).min(measure).max(self.px(40.0)) as f32;
+        let page_gap = (font_px * PAGE_GAP_EM).round() as i32;
+        let pitch = text_w as i32 + page_gap;
         let text_h = (editor.h - mt).max(self.px(20.0)) as f32;
         let line_height = body_lh(font_px) as i32;
         let (zoom, scale) = (self.zoom, self.scale);
         let focused = self.focused && self.cursor_visible && !self.list_open;
         let cursor_w = self.px(2.0).max(1);
-        let ox = editor.x + ml;
+        let ox_base = editor.x + ml;
         let oy = editor.y + mt;
+        // Rolagem horizontal entre páginas: limitada e seguindo a página atual.
+        let hs = {
+            let view = (editor.w - 2 * ml).max(1);
+            let tab = &mut self.tabs[self.active];
+            let total = tab.pages.len() as i32 * pitch - page_gap;
+            if std::mem::take(&mut tab.reveal) {
+                let l = tab.cur as i32 * pitch;
+                let r = l + text_w as i32;
+                if (l as f32) < tab.hscroll {
+                    tab.hscroll = l as f32;
+                } else if r as f32 > tab.hscroll + view as f32 {
+                    tab.hscroll = (r - view) as f32;
+                }
+            }
+            tab.hscroll = tab.hscroll.clamp(0.0, (total - view).max(0) as f32);
+            tab.hscroll.round() as i32
+        };
+        let ox = ox_base + self.tab().cur as i32 * pitch - hs;
+        let mut page_rects: Vec<(Rect, usize)> = Vec::new();
+        let mut page_grips: Vec<Rect> = Vec::new();
+        let grip_hot = self.page_drag.is_some() || self.page_hover;
         let mut checkboxes = Vec::new();
         let mut toggles = Vec::new();
         let mut cols = Vec::new();
@@ -2228,13 +2417,25 @@ impl Ui {
         {
             let Ui { font_system, swash, tabs, active, traced, images, prof, img_sel, img_hover, img_ghost, .. } = self;
             let traced_flag = traced;
-            let tab = &mut tabs[*active];
+            let note = &mut tabs[*active];
+            let (cur_page, npages) = (note.cur, note.pages.len());
+            let focused_any = focused;
+            for pi in 0..npages {
+            let ox = ox_base + pi as i32 * pitch - hs;
+            if ox > editor.right() || ox + text_w as i32 + page_gap < editor.x {
+                continue;
+            }
+            let is_cur = pi == cur_page;
+            let focused = focused_any && is_cur;
+            let marks = (checkboxes.len(), toggles.len(), cols.len(), col_divs.len(), cells.len(), img_hits.len(), seg_hits.len());
+            let tab: &mut Page = &mut note.pages[pi];
             if tab.metrics_key != (zoom, scale) {
                 tab.metrics_key = (zoom, scale);
                 tab.editor.with_buffer_mut(|b| b.set_metrics(Metrics::new(font_px, body_lh(font_px))));
                 tab.restyle(font_system, images, font_px);
             }
-            let wide_w = (editor.right() - ml - ox).max(text_w as i32) as f32;
+            // Tabelas e imagens podem passar da página só na última (até a margem).
+            let wide_w = if pi + 1 < npages { text_w } else { (editor.w - 2 * ml - pi as i32 * pitch).max(text_w as i32) as f32 };
             if tab.editor_size != (text_w, text_h) || tab.wide_w != wide_w {
                 tab.editor_size = (text_w, text_h);
                 tab.wide_w = wide_w;
@@ -2254,8 +2455,10 @@ impl Ui {
             prof_add(prof, P_GLYPHS, pt);
             pt = Instant::now();
             let all: Vec<&md::LineInfo> = tab.lines.iter().collect();
+            // Régua `___`: de margem a margem da janela, por cima das outras páginas.
+            let full = ((editor.x + ml - ox) as f32, (editor.right() - ml - ox) as f32);
             let row_lines: Vec<usize> = tab.img_rows.iter().map(|r| r.line).collect();
-            let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift, &row_lines));
+            let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift, &row_lines, full));
             draw_decos(canvas, decos, ox, oy, &mut checkboxes, &mut toggles);
             // ---- colunas: sub-buffers no espaço da linha `:::` ----
             let sel = tab.editor.selection_bounds();
@@ -2313,7 +2516,7 @@ impl Ui {
                     }
                     if !col.map.is_empty() {
                         let infos: Vec<&md::LineInfo> = col.map.iter().map(|&m| &tab.lines[m]).collect();
-                        let decos = collect_decos(&col.buffer, &infos, font_px, col.w, scale, &col.map, &tab.line_shift, &[]);
+                        let decos = collect_decos(&col.buffer, &infos, font_px, col.w, scale, &col.map, &tab.line_shift, &[], (0.0, col.w));
                         draw_decos(canvas, decos, x0, y0, &mut checkboxes, &mut toggles);
                         if let (true, Some(sl)) = (focused, col.sub_line(cursor.line)) {
                             let sub = Cursor::new(sl, cursor.index);
@@ -2421,10 +2624,10 @@ impl Ui {
                     canvas.blit(rect.x, rect.y, bm.w, bm.h, &bm.rgba);
                     // Borda fina: branca na selecionada, apagada sob o mouse.
                     let key = Some((im.line, im.start));
-                    let border = if *img_sel == key {
+                    let border = if is_cur && *img_sel == key {
                         sel_shown = true;
                         Some(WHITE)
-                    } else if *img_hover == key {
+                    } else if is_cur && *img_hover == key {
                         Some(DIM2)
                     } else {
                         None
@@ -2462,19 +2665,19 @@ impl Ui {
                     if seg.start == 0 {
                         // Marcadores de bloco (lista, tarefa, citação) do começo da linha.
                         let info = [&tab.lines[row.line]];
-                        let decos = collect_decos(&seg.buffer, &info, font_px, text_w, scale, &[row.line], &[], &[]);
+                        let decos = collect_decos(&seg.buffer, &info, font_px, text_w, scale, &[row.line], &[], &[], (0.0, text_w));
                         draw_decos(canvas, decos, tx, ty, &mut checkboxes, &mut toggles);
                     }
                     let hit_w = (seg.hit_end - seg.x).max(1.0) as i32;
                     seg_hits.push(SegHit { rect: Rect::new(tx, y, hit_w, row.h as i32), line: row.line, start: seg.start, ri, si, tx, ty });
                 }
             }
-            if !sel_shown {
+            if is_cur && !sel_shown {
                 *img_sel = None;
             }
             // Prévia da imagem sendo arrastada: 50 % de opacidade e menos saturada,
             // no ponto onde ela cairia.
-            if let Some(g) = img_ghost.as_ref() {
+            if let Some(g) = img_ghost.as_ref().filter(|_| is_cur) {
                 if let (Some((x, y, _)), Some(bm)) = (tab.caret_xy(g.target), images.scaled(&g.path, g.w)) {
                     let (x, y) = (ox + x.round() as i32, oy + y.round() as i32);
                     canvas.set_clip(editor);
@@ -2496,21 +2699,64 @@ impl Ui {
                     canvas.rect(ox + cx, oy + cy + dy, cursor_w, lh.unwrap_or(line_height), WHITE);
                 }
             }
+            // Só a página atual responde a cliques em caixas, imagens etc.
+            if !is_cur {
+                checkboxes.truncate(marks.0);
+                toggles.truncate(marks.1);
+                cols.truncate(marks.2);
+                col_divs.truncate(marks.3);
+                cells.truncate(marks.4);
+                img_hits.truncate(marks.5);
+                seg_hits.truncate(marks.6);
+            }
+            canvas.set_clip(editor);
+            page_rects.push((Rect::new(ox, editor.y, text_w as i32, editor.h), pi));
+            // Borda direita da página: alça para alargar/estreitar todas as páginas.
+            let gx = ox + text_w as i32 + page_gap / 2;
+            if npages > 1 && pi + 1 < npages {
+                canvas.rect(gx, oy, 1, editor.bottom() - oy - mt, LINE);
+            }
+            if grip_hot {
+                canvas.rect(gx - 1, oy, 3, editor.bottom() - oy - mt, DIM);
+            }
+            page_grips.push(Rect::new(gx - COL_GRIP, oy, 2 * COL_GRIP + 1, editor.bottom() - oy));
             canvas.reset_clip();
+            }
             prof_add(prof, P_DECOS, pt);
             pt = Instant::now();
+        }
+        let page_add = {
+            // "+" depois da última página; se ela passa da janela, preso à borda visível.
+            let b = (font_px * 1.5).round() as i32;
+            let last_right = ox_base + self.tab().pages.len() as i32 * pitch - page_gap - hs;
+            let bx = (last_right + page_gap).min(editor.right() - ml / 2 - b);
+            Rect::new(bx, oy, b, b)
+        };
+        if page_add.w > 0 && page_add.x < editor.right() {
+            let hot = page_add.contains(self.hover.0, self.hover.1);
+            canvas.set_clip(editor);
+            if hot {
+                canvas.rounded_rect(page_add.x, page_add.y, page_add.w, page_add.h, self.px(RADIUS_SM), HOVER);
+            }
+            let (cx, cy, d) = (page_add.x + page_add.w / 2, page_add.y + page_add.h / 2, page_add.w / 4);
+            let t = self.px(1.5).max(1);
+            let c = if hot { WHITE } else { DIM2 };
+            canvas.rect(cx - d, cy - t / 2, 2 * d + 1, t, c);
+            canvas.rect(cx - t / 2, cy - d, t, 2 * d + 1, c);
+            canvas.reset_clip();
         }
 
         // ---- rodapé ----
         let fy = h - footer_h;
         canvas.rect(0, fy, w, 1, LINE);
         let fcy = fy + footer_h / 2;
-        let (status, words, chars) = {
+        let (status, words, chars, page) = {
             let t = self.tab();
-            (t.status.clone(), t.words, t.chars)
+            let page = if t.pages.len() > 1 { format!("página {} de {}  ·  ", t.cur + 1, t.pages.len()) } else { String::new() };
+            (t.status.clone(), t.words, t.chars, page)
         };
         let counter = format!(
-            "{} {}  ·  {} {}",
+            "{page}{} {}  ·  {} {}",
             words,
             if words == 1 { "palavra" } else { "palavras" },
             chars,
@@ -2545,6 +2791,9 @@ impl Ui {
         if self.slash.is_some() {
             self.paint_slash(canvas, ox, oy, editor);
         }
+        if self.ctx.is_some() {
+            self.paint_ctx(canvas, editor);
+        }
         prof_add(&mut self.prof, P_PANELS, pt);
 
         self.hits = Hits {
@@ -2566,6 +2815,9 @@ impl Ui {
             cells,
             segs: seg_hits,
             images: img_hits,
+            pages: page_rects,
+            page_grips,
+            page_add,
         };
     }
 
@@ -2630,6 +2882,83 @@ impl Ui {
             .filter(|(_, (label, key, words))| q.is_empty() || label.to_lowercase().contains(&q) || key.contains(&q) || words.contains(&q))
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// Itens do menu do botão direito que casam com a busca (sem acento).
+    fn ctx_matches(&self) -> Vec<usize> {
+        let Some(c) = &self.ctx else { return Vec::new() };
+        let words: Vec<String> = fold(&c.query).split_whitespace().map(str::to_string).collect();
+        (0..CTX_ITEMS.len())
+            .filter(|&i| {
+                let (label, _, _, kw, needs_sel) = CTX_ITEMS[i];
+                if needs_sel && !c.has_sel {
+                    return false;
+                }
+                let hay = fold(&format!("{label} {kw}"));
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .collect()
+    }
+
+    fn paint_ctx(&mut self, canvas: &mut Canvas, area: Rect) {
+        let matches = self.ctx_matches();
+        let row_h = self.px(MENU_ROW_H);
+        let pad = self.px(SP2);
+        let pw = self.px(MENU_W + 32.0);
+        let search_h = row_h + pad;
+        let max_rows = ((area.h - search_h - 3 * pad) / row_h).clamp(1, 12) as usize;
+        let shown = matches.len().clamp(1, max_rows);
+        let ph = pad * 2 + search_h + row_h * shown as i32;
+        let Some(c) = self.ctx.as_mut() else { return };
+        c.sel = c.sel.min(matches.len().saturating_sub(1));
+        if c.sel < c.top {
+            c.top = c.sel;
+        } else if c.sel >= c.top + max_rows {
+            c.top = c.sel + 1 - max_rows;
+        }
+        c.top = c.top.min(matches.len().saturating_sub(shown));
+        let (sel, top) = (c.sel, c.top);
+        let x0 = c.x.min(area.right() - pw - pad).max(area.x + pad);
+        let y0 = if c.y + ph > area.bottom() { (c.y - ph).max(area.y) } else { c.y };
+        let query = c.query.clone();
+        for i in 1..=3 {
+            let o = self.px(2.0) * i;
+            canvas.rounded_rect(x0 - o / 2, y0 + o / 2, pw + o, ph + o, self.px(RADIUS_LG) + o / 2, white(6));
+        }
+        canvas.rounded_outline(x0, y0, pw, ph, self.px(RADIUS_LG), BORDER, BLACK);
+        // Campo de busca.
+        let sx = x0 + pad + self.px(SP3);
+        let sy = y0 + pad + row_h / 2;
+        let qw = if query.is_empty() {
+            self.label(canvas, "Buscar ação…", sx + self.px(SP1), sy, UI_FONT, Weight::NORMAL, DIM2, 0, Some((pw - 2 * pad) as f32));
+            -self.px(2.0)
+        } else {
+            self.label(canvas, &query, sx, sy, UI_FONT, Weight::NORMAL, WHITE, 0, Some((pw - 2 * pad - self.px(SP4)) as f32))
+        };
+        let caret_h = self.px(16.0);
+        canvas.rect(sx + qw + 1, sy - caret_h / 2, self.px(1.5).max(1), caret_h, WHITE);
+        canvas.rect(x0 + pad, y0 + pad + search_h - pad / 2, pw - 2 * pad, 1, LINE);
+        let list_y = y0 + pad + search_h;
+        let mut rows = Vec::new();
+        if matches.is_empty() {
+            self.label(canvas, "Nada encontrado", sx, list_y + row_h / 2, UI_FONT, Weight::NORMAL, DIM, 0, Some((pw - 2 * pad) as f32));
+        }
+        for (vi, &mi) in matches.iter().enumerate().skip(top).take(shown) {
+            let r = Rect::new(x0 + pad, list_y + row_h * (vi - top) as i32, pw - 2 * pad, row_h);
+            if vi == sel {
+                canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), ROW_SEL);
+            }
+            let (label, keys, ..) = CTX_ITEMS[mi];
+            self.label(canvas, label, r.x + self.px(SP3), r.y + r.h / 2, UI_FONT, if vi == sel { Weight::SEMIBOLD } else { Weight::NORMAL }, WHITE, 0, Some((r.w - self.px(110.0)) as f32));
+            if !keys.is_empty() {
+                self.label(canvas, keys, r.right() - self.px(SP3), r.y + r.h / 2, UI_FONT_XS, Weight::NORMAL, DIM2, 2, None);
+            }
+            rows.push((r, vi));
+        }
+        if let Some(c) = self.ctx.as_mut() {
+            c.rows = rows;
+            c.panel = Rect::new(x0, y0, pw, ph);
+        }
     }
 
     fn paint_slash(&mut self, canvas: &mut Canvas, ox: i32, oy: i32, editor: Rect) {
@@ -2945,7 +3274,9 @@ fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxe
 
 /// Decorações Markdown a partir das posições reais dos glifos.
 /// `rows`: linhas do buffer principal desenhadas como faixa de imagem (sem decoração aqui).
-fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32, scale: i32, map: &[usize], shift: &[i32], rows: &[usize]) -> Vec<Deco> {
+/// `full`: de onde a onde (x) vai a régua `___` (a tela toda no buffer principal).
+#[allow(clippy::too_many_arguments)]
+fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32, scale: i32, map: &[usize], shift: &[i32], rows: &[usize], full: (f32, f32)) -> Vec<Deco> {
     let mut out = Vec::new();
     let s = scale as f32;
     let thin = (1.0 * s).round().max(1.0) as i32;
@@ -2966,7 +3297,8 @@ fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32,
             let glyph_at = |idx: usize| run.glyphs.iter().find(|g| g.start == idx);
             match info.block {
                 Block::Rule => {
-                    out.push(Deco::Line { x0: 0, y0: top + h / 2, x1: text_w as i32, y1: top + h / 2, t: thin, c: white(0x40) });
+                    let (x0, x1) = if info.full_rule { (full.0 as i32, full.1 as i32) } else { (0, text_w as i32) };
+                    out.push(Deco::Line { x0, y0: top + h / 2, x1, y1: top + h / 2, t: thin, c: white(0x40) });
                 }
                 Block::Code | Block::Fence => {
                     let x = -(12.0 * s) as i32;
@@ -3178,6 +3510,10 @@ fn main() {
         img_hover: None,
         img_ghost: None,
         col_drag: None,
+        page_em: state.page_em.clamp(PAGE_MIN_EM, PAGE_MAX_EM),
+        ctx: None,
+        page_drag: None,
+        page_hover: false,
         traced: false,
         prof: Prof::new(),
         labels: Vec::new(),
@@ -3334,7 +3670,11 @@ impl App {
 
     fn test_command_inner(&mut self, line: &str) {
         let (cmd, arg) = line.split_once(' ').unwrap_or((line, ""));
-        let btn = |a: &str| if a == "middle" { BTN_MIDDLE } else { BTN_LEFT };
+        let btn = |a: &str| match a {
+            "middle" => BTN_MIDDLE,
+            "right" => BTN_RIGHT,
+            _ => BTN_LEFT,
+        };
         match cmd {
             "mods" => {
                 let mut m = Modifiers::default();
@@ -3376,6 +3716,7 @@ impl App {
             "press" => self.on_pointer_press(btn(arg.trim()), self.last_serial),
             "release" => self.on_pointer_release(btn(arg.trim())),
             "scroll" => self.on_scroll(arg.trim().parse().unwrap_or(0.0)),
+            "hscroll" => self.on_hscroll(arg.trim().parse().unwrap_or(0.0)),
             "resize" => {
                 if let Some((w, h)) = arg.split_once(' ') {
                     self.ui.width = w.trim().parse().unwrap_or(self.ui.width);
@@ -3603,6 +3944,7 @@ impl App {
             }
         }
         if changed {
+            self.ui.tab_mut().reveal = true;
             let t0 = Instant::now();
             self.ui.restyle_active();
             let line = self.ui.tab().editor.cursor().line;
@@ -4009,6 +4351,11 @@ impl App {
     fn smart_backspace(&mut self) {
         let tab = self.ui.tab();
         let cur = tab.editor.cursor();
+        if tab.editor.selection() == Selection::None && tab.pages.len() > 1 && tab.page_text().is_empty() {
+            // Página vazia: Backspace a remove e volta para a anterior.
+            self.delete_page();
+            return;
+        }
         if tab.editor.selection() == Selection::None {
             // Logo depois de uma imagem: ela some inteira.
             if let Some(im) = tab.inline_imgs.iter().find(|im| im.line == cur.line && im.end == cur.index) {
@@ -4318,6 +4665,8 @@ impl App {
             "toggle" => self.set_prefix(Some(md::Prefix::Toggle)),
             "quote" => self.set_prefix(Some(md::Prefix::Quote)),
             "hr" => self.insert_block("---\n", 1, 0),
+            "hrfull" => self.insert_block("___\n", 1, 0),
+            "page" => self.new_page(false),
             "table" => self.insert_table(),
             "col2" | "col3" | "col4" => {
                 let n = key.as_bytes()[3] - b'0';
@@ -4395,7 +4744,7 @@ impl App {
     }
 
     /// Substitui o conteúdo da linha `line` (dentro de uma mudança já aberta).
-    fn replace_line(tab: &mut Tab, line: usize, new: &str) {
+    fn replace_line(tab: &mut Page, line: usize, new: &str) {
         let old_len = tab.line_text(line).len();
         tab.editor.delete_range(Cursor::new(line, 0), Cursor::new(line, old_len));
         tab.editor.insert_at(Cursor::new(line, 0), new, None);
@@ -4834,6 +5183,183 @@ impl App {
         }
     }
 
+    // ---------- menu do botão direito ----------
+
+    fn open_ctx(&mut self, px: i32, py: i32) {
+        let has_sel = self.ui.tab().editor.selection_bounds().is_some_and(|(a, b)| a != b);
+        self.ui.slash = None;
+        self.ui.ctx = Some(Ctx { x: px, y: py, query: String::new(), sel: 0, top: 0, has_sel, rows: Vec::new(), panel: Rect::default() });
+        self.set_cursor_icon(CursorIcon::Default);
+        self.request_redraw();
+    }
+
+    fn ctx_key(&mut self, ev: &KeyEvent) {
+        let n = self.ui.ctx_matches().len();
+        let Some(c) = self.ui.ctx.as_mut() else { return };
+        match ev.keysym {
+            Keysym::Escape => self.ui.ctx = None,
+            Keysym::Up => c.sel = (c.sel + n.max(1) - 1) % n.max(1),
+            Keysym::Down | Keysym::Tab => c.sel = (c.sel + 1) % n.max(1),
+            Keysym::Page_Up => c.sel = c.sel.saturating_sub(8),
+            Keysym::Page_Down => c.sel = (c.sel + 8).min(n.saturating_sub(1)),
+            Keysym::Home => c.sel = 0,
+            Keysym::End => c.sel = n.saturating_sub(1),
+            Keysym::Return | Keysym::KP_Enter => {
+                let sel = c.sel;
+                self.ctx_apply(sel);
+                return;
+            }
+            Keysym::BackSpace => {
+                c.query.pop();
+                c.sel = 0;
+            }
+            _ => {
+                if let Some(t) = ev.utf8.as_ref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
+                    c.query.push_str(t);
+                    c.sel = 0;
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Executa o item `vi` (posição na lista filtrada) e fecha o menu.
+    fn ctx_apply(&mut self, vi: usize) {
+        let matches = self.ui.ctx_matches();
+        self.ui.ctx = None;
+        self.request_redraw();
+        let Some(&mi) = matches.get(vi) else { return };
+        match CTX_ITEMS[mi].2 {
+            "copy" => {
+                self.copy();
+            }
+            "cut" => self.cut(),
+            "paste" => self.paste(false),
+            "all" => self.select_all(),
+            "bold" => self.wrap_selection("**", "**"),
+            "italic" => self.wrap_selection("*", "*"),
+            "strike" => self.wrap_selection("~~", "~~"),
+            "code" => self.wrap_selection("`", "`"),
+            "link" => self.wrap_selection("[", "](https://)"),
+            "color" => self.open_picker(),
+            "nocolor" => self.remove_color(),
+            "upper" => self.transform_selection(|t| t.to_uppercase()),
+            "lower" => self.transform_selection(|t| t.to_lowercase()),
+            "title" => self.transform_selection(title_case),
+            "h1" => self.set_prefix(Some(md::Prefix::Heading(1))),
+            "h2" => self.set_prefix(Some(md::Prefix::Heading(2))),
+            "h3" => self.set_prefix(Some(md::Prefix::Heading(3))),
+            "p" => self.set_prefix(None),
+            "ul" => self.set_prefix(Some(md::Prefix::Bullet)),
+            "ol" => self.set_prefix(Some(md::Prefix::Numbered)),
+            "todo" => self.set_prefix(Some(md::Prefix::Task)),
+            "quote" => self.set_prefix(Some(md::Prefix::Quote)),
+            "dup" => self.duplicate_line(),
+            "delline" => self.delete_line(),
+            "emoji" => self.open_glyphs(GlyphKind::Emoji),
+            "hrfull" => self.toggle_full_rule(),
+            "page" => self.new_page(false),
+            _ => {}
+        }
+        self.after_input();
+    }
+
+    /// Troca o texto selecionado (linha a linha) por `f(texto)`, mantendo a seleção.
+    fn transform_selection(&mut self, f: impl Fn(&str) -> String) {
+        let Some((a, b)) = self.ui.tab().editor.selection_bounds().filter(|(a, b)| a != b) else { return };
+        let (_, tab) = self.ui.ed();
+        tab.editor.start_change();
+        let mut end = b;
+        for line in (a.line..=b.line).rev() {
+            let text = tab.line_text(line);
+            let s = if line == a.line { a.index } else { 0 };
+            let e = if line == b.line { b.index } else { text.len() };
+            let new = f(&text[s..e]);
+            tab.editor.delete_range(Cursor::new(line, s), Cursor::new(line, e));
+            tab.editor.insert_at(Cursor::new(line, s), &new, None);
+            if line == b.line {
+                end = Cursor::new(line, s + new.len());
+            }
+        }
+        let change = tab.editor.finish_change();
+        tab.editor.set_selection(Selection::Normal(a));
+        tab.editor.set_cursor(end);
+        self.after_change(change, true);
+    }
+
+    // ---------- páginas lado a lado ----------
+
+    fn switch_page(&mut self, pi: usize) {
+        let tab = self.ui.tab_mut();
+        if pi >= tab.pages.len() {
+            return;
+        }
+        tab.cur = pi;
+        tab.reveal = true;
+        self.ui.img_sel = None;
+        self.ui.slash = None;
+        self.wake_cursor();
+        self.after_input();
+        self.request_redraw();
+    }
+
+    /// Página nova (vazia) logo depois da atual, ou no fim (`at_end`, botão "+").
+    fn new_page(&mut self, at_end: bool) {
+        let fp = self.ui.font_px();
+        let Ui { font_system, tabs, active, .. } = &mut self.ui;
+        let tab = &mut tabs[*active];
+        let page = Page::new(font_system, fp);
+        let next = if at_end { tab.pages.len() } else { tab.cur + 1 };
+        tab.pages.insert(next, page);
+        self.page_changed();
+        self.switch_page(next);
+    }
+
+    /// Apaga a página atual (só se houver outra).
+    fn delete_page(&mut self) {
+        let tab = self.ui.tab_mut();
+        if tab.pages.len() < 2 {
+            return;
+        }
+        let cur = tab.cur;
+        tab.pages.remove(cur);
+        tab.cur = cur.saturating_sub(1).min(tab.pages.len() - 1);
+        let to = tab.cur;
+        self.page_changed();
+        self.switch_page(to);
+    }
+
+    /// Mudou o número de páginas: a nota precisa ser salva.
+    fn page_changed(&mut self) {
+        self.ui.tab_mut().on_text_changed();
+        self.schedule_autosave();
+        self.request_redraw();
+    }
+
+    /// Ctrl+-: régua de tela inteira. Numa régua, alterna `---` ↔ `___`;
+    /// em outra linha, insere `___` abaixo.
+    fn toggle_full_rule(&mut self) {
+        let tab = self.ui.tab();
+        let cur = tab.editor.cursor();
+        let line = tab.line_text(cur.line);
+        if tab.lines.get(cur.line).is_some_and(|l| l.block == Block::Rule && l.col.is_none()) {
+            let full = tab.lines[cur.line].full_rule;
+            let new = if full { "---" } else { "___" };
+            let (_, tab) = self.ui.ed();
+            tab.editor.set_selection(Selection::None);
+            tab.editor.start_change();
+            Self::replace_line(tab, cur.line, new);
+            let change = tab.editor.finish_change();
+            tab.editor.set_cursor(Cursor::new(cur.line, new.len()));
+            self.after_change(change, true);
+        } else if line.trim().is_empty() {
+            self.insert_block("___\n", 1, 0);
+        } else {
+            self.ui.tab_mut().editor.set_cursor(Cursor::new(cur.line, line.len()));
+            self.insert_block("\n___\n", 2, 0);
+        }
+    }
+
     fn cycle_tab(&mut self, delta: i32) {
         let n = self.ui.tabs.len() as i32;
         let i = (self.ui.active as i32 + delta).rem_euclid(n) as usize;
@@ -5178,7 +5704,7 @@ impl App {
         let markup = self.ui.tab().line_text(line).get(start..end).map(str::to_string);
         let Some(markup) = markup else { return };
         let len = markup.len();
-        let remove_line = |tab: &mut Tab, l: usize| {
+        let remove_line = |tab: &mut Page, l: usize| {
             // Linha que só tinha a imagem: some inteira.
             if !tab.line_text(l).trim().is_empty() {
                 return false;
@@ -5370,6 +5896,13 @@ impl App {
             _ => ch.filter(|c| c.is_ascii_digit()).map(|c| c as u8 - b'0'),
         };
 
+        if self.ui.ctx.is_some() {
+            if !sym.is_modifier_key() {
+                self.ctx_key(ev);
+            }
+            return;
+        }
+
         if self.ui.slash.is_some() && !m.ctrl && !m.alt {
             match sym {
                 Keysym::Escape => {
@@ -5497,6 +6030,7 @@ impl App {
                 (Some('v'), _) => self.paste(false),
                 (Some('a'), _) => self.select_all(),
                 (Some('='), _) | (Some('+'), _) => self.zoom_by(1),
+                (Some('-'), _) if !m.shift => self.toggle_full_rule(),
                 (Some('-'), _) | (Some('_'), _) => self.zoom_by(-1),
                 (Some('0'), _) => self.zoom_by(0),
                 (Some(d @ '1'..='9'), _) => self.switch_tab(d as usize - '1' as usize),
@@ -5519,9 +6053,14 @@ impl App {
             return;
         }
         if m.alt && !m.logo {
+            let cur = self.ui.tab().cur;
             match sym {
                 Keysym::Up => self.move_line(-1),
                 Keysym::Down => self.move_line(1),
+                // Alt+←/→: página anterior/seguinte; Ctrl+Alt+N: página nova.
+                Keysym::Left if cur > 0 => self.switch_page(cur - 1),
+                Keysym::Right => self.switch_page(cur + 1),
+                _ if m.ctrl && ch == Some('n') => self.new_page(false),
                 _ => {}
             }
             self.after_input();
@@ -5720,6 +6259,17 @@ impl App {
             self.picker_track(px, py);
             return;
         }
+        if let Some(c) = self.ui.ctx.as_mut() {
+            self.ui.hover = (px, py);
+            if let Some(&(_, vi)) = c.rows.iter().find(|(r, _)| r.contains(px, py)) {
+                if c.sel != vi {
+                    c.sel = vi;
+                    self.request_redraw();
+                }
+            }
+            self.set_cursor_icon(CursorIcon::Default);
+            return;
+        }
         if self.img_drag.is_some() {
             self.ui.hover = (px, py);
             self.image_drag_motion(px, py);
@@ -5733,6 +6283,26 @@ impl App {
         if self.ui.col_drag.is_some() {
             self.ui.hover = (px, py);
             self.col_drag_motion(px);
+            return;
+        }
+        if let Some((x0, w0)) = self.ui.page_drag {
+            self.ui.hover = (px, py);
+            let fp = self.ui.font_px();
+            let em = ((w0 + (px - x0) as f32) / fp).clamp(PAGE_MIN_EM, PAGE_MAX_EM);
+            if (em - self.ui.page_em).abs() > 0.01 {
+                self.ui.page_em = em;
+                self.request_redraw();
+            }
+            return;
+        }
+        let grip = !self.ui.list_open && !self.pointer_down && self.ui.hits.page_grips.iter().any(|r| r.contains(px, py));
+        if grip != self.ui.page_hover {
+            self.ui.page_hover = grip;
+            self.request_redraw();
+        }
+        if grip {
+            self.ui.hover = (px, py);
+            self.set_cursor_icon(CursorIcon::EwResize);
             return;
         }
         let div = if self.ui.list_open || self.pointer_down {
@@ -5778,7 +6348,7 @@ impl App {
         self.ui.hover = (px, py);
         if self.pointer_down && !self.ui.list_open {
             if let Some(c) = self.cell_hit(px, py).or_else(|| self.seg_hit(px, py)).or_else(|| self.column_hit(px, py)) {
-                let tab = self.ui.tab_mut();
+                let (_, tab) = self.ui.ed();
                 if tab.editor.selection() == Selection::None {
                     tab.editor.set_selection(Selection::Normal(tab.editor.cursor()));
                 }
@@ -5848,6 +6418,20 @@ impl App {
                 }
             } else {
                 self.close_glyphs();
+            }
+            return;
+        }
+        if let Some(c) = &self.ui.ctx {
+            // Menu do botão direito aberto: clique numa ação a executa; fora, fecha.
+            if c.panel.contains(px, py) {
+                if let Some(&(_, vi)) = c.rows.iter().find(|(r, _)| r.contains(px, py)) {
+                    if button == BTN_LEFT {
+                        self.ctx_apply(vi);
+                    }
+                }
+            } else {
+                self.ui.ctx = None;
+                self.request_redraw();
             }
             return;
         }
@@ -5976,13 +6560,53 @@ impl App {
                 self.set_cursor_icon(CursorIcon::Grab);
                 return;
             }
+            if self.ui.hits.page_add.contains(px, py) {
+                self.new_page(true);
+                return;
+            }
+            if self.ui.hits.page_grips.iter().any(|r| r.contains(px, py)) {
+                let now = Instant::now();
+                let (t, pos, _) = self.last_click;
+                let double = now - t < Duration::from_millis(400) && (pos.0 - self.pointer_pos.0).abs() < 5.0;
+                self.last_click = (now, self.pointer_pos, 1);
+                if double {
+                    // Duplo clique na borda: largura padrão.
+                    self.ui.page_em = MEASURE_EM;
+                    self.ui.persist_state();
+                    self.last_click = (now - Duration::from_secs(10), self.pointer_pos, 0);
+                } else {
+                    let w0 = self.ui.page_em * self.ui.font_px();
+                    self.ui.page_drag = Some((px, w0));
+                }
+                self.set_cursor_icon(CursorIcon::EwResize);
+                self.request_redraw();
+                return;
+            }
+            // Clique em outra página: ela passa a ser a atual, com o cursor ali.
+            let other = self.ui.hits.pages.iter().find(|(r, _)| r.contains(px, py)).copied();
+            if let Some((r, pi)) = other.filter(|&(_, pi)| pi != self.ui.tab().cur) {
+                self.ui.tab_mut().cur = pi;
+                self.ui.img_sel = None;
+                let (x, y) = (px - r.x, py - self.ui.hits.text_origin.1);
+                let (fs, tab) = self.ui.ed();
+                tab.editor.set_selection(Selection::None);
+                tab.editor.action(fs, Action::Click { x, y });
+                self.settle_cursor(Cursor::new(0, 0), true, false);
+                self.snap_out_of_image(true);
+                self.ui.hits.text_origin.0 = r.x;
+                self.pointer_down = true;
+                self.wake_cursor();
+                self.after_input();
+                self.request_redraw();
+                return;
+            }
         }
         if button == BTN_LEFT {
             self.ui.img_sel = None;
         }
         if button == BTN_LEFT {
             if let Some(c) = self.cell_hit(px, py).or_else(|| self.seg_hit(px, py)).or_else(|| self.column_hit(px, py)) {
-                let tab = self.ui.tab_mut();
+                let (_, tab) = self.ui.ed();
                 if self.modifiers.shift {
                     if tab.editor.selection() == Selection::None {
                         tab.editor.set_selection(Selection::Normal(tab.editor.cursor()));
@@ -6032,12 +6656,39 @@ impl App {
                     tab.editor.action(fs, Action::Click { x, y });
                     self.paste(true);
                 }
+                BTN_RIGHT => {
+                    // Dentro da seleção, o menu age nela; fora, o cursor vai ao clique.
+                    let hit = self.cell_hit(px, py).or_else(|| self.seg_hit(px, py)).or_else(|| self.column_hit(px, py));
+                    let at = hit.or_else(|| self.ui.tab().editor.with_buffer(|b| b.hit(x as f32, y as f32)));
+                    let inside = match (self.ui.tab().editor.selection_bounds(), at) {
+                        (Some((a, b)), Some(c)) => a != b && c >= a && c <= b,
+                        _ => false,
+                    };
+                    if !inside {
+                        let (fs, tab) = self.ui.ed();
+                        tab.editor.set_selection(Selection::None);
+                        match hit {
+                            Some(c) => tab.editor.set_cursor(c),
+                            None => tab.editor.action(fs, Action::Click { x, y }),
+                        }
+                        self.settle_cursor(Cursor::new(0, 0), true, false);
+                        self.snap_out_of_image(true);
+                        self.after_input();
+                    }
+                    self.open_ctx(px, py);
+                }
                 _ => {}
             }
         }
     }
 
     fn on_pointer_release(&mut self, button: u32) {
+        if button == BTN_LEFT && self.ui.page_drag.take().is_some() {
+            self.ui.persist_state();
+            self.request_redraw();
+            self.on_pointer_motion();
+            return;
+        }
         if button == BTN_LEFT && self.ui.col_drag.take().is_some() {
             // Fecha o grupo de desfazer: o arraste inteiro vira um só passo.
             self.ui.tab_mut().undo.release();
@@ -6061,19 +6712,40 @@ impl App {
         }
     }
 
+    /// Rolagem horizontal (touchpad ou Shift+roda): anda entre as páginas.
+    fn on_hscroll(&mut self, dx: f64) {
+        let step = (dx * 3.0 * self.ui.scale as f64) as f32;
+        let tab = self.ui.tab_mut();
+        if tab.pages.len() < 2 {
+            return;
+        }
+        tab.hscroll += step;
+        self.request_redraw();
+    }
+
     fn on_scroll(&mut self, vertical: f64) {
         if vertical == 0.0 {
             return;
         }
         let (px, py) = self.phys();
-        if let Some(g) = self.ui.glyphs.as_mut() {
+        let n_ctx = self.ui.ctx_matches().len();
+        if let Some(c) = self.ui.ctx.as_mut() {
+            c.sel = if vertical > 0.0 { (c.sel + 1).min(n_ctx.saturating_sub(1)) } else { c.sel.saturating_sub(1) };
+        } else if let Some(g) = self.ui.glyphs.as_mut() {
             g.scroll(if vertical > 0.0 { 1 } else { -1 });
         } else if self.ui.list_open && self.ui.hits.panel.contains(px, py) {
             self.ui.list_move(if vertical > 0.0 { 1 } else { -1 });
+        } else if self.modifiers.ctrl {
+            // Ctrl+roda: zoom (Ctrl+- agora é a régua de tela inteira).
+            self.zoom_by(if vertical > 0.0 { -1 } else { 1 });
         } else {
+            // Cada página rola sozinha: a que está sob o mouse.
             let pixels = (vertical * 3.0 * self.ui.scale as f64) as f32;
-            let (fs, tab) = self.ui.ed();
-            tab.editor.action(fs, Action::Scroll { pixels });
+            let pi = self.ui.hits.pages.iter().find(|(r, _)| r.contains(px, py)).map(|&(_, i)| i);
+            let Ui { font_system, tabs, active, .. } = &mut self.ui;
+            let tab = &mut tabs[*active];
+            let pi = pi.filter(|&i| i < tab.pages.len()).unwrap_or(tab.cur);
+            tab.pages[pi].editor.action(font_system, Action::Scroll { pixels });
         }
         self.request_redraw();
     }
@@ -6262,7 +6934,18 @@ impl PointerHandler for App {
                     self.last_serial = serial;
                     self.on_pointer_release(button);
                 }
-                PointerEventKind::Axis { vertical, .. } => self.on_scroll(vertical.absolute),
+                PointerEventKind::Axis { vertical, horizontal, .. } => {
+                    if horizontal.absolute != 0.0 {
+                        self.on_hscroll(horizontal.absolute);
+                    }
+                    if vertical.absolute != 0.0 {
+                        if self.modifiers.shift {
+                            self.on_hscroll(vertical.absolute);
+                        } else {
+                            self.on_scroll(vertical.absolute);
+                        }
+                    }
+                }
             }
         }
     }

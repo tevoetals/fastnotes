@@ -80,6 +80,8 @@ pub struct LineInfo {
     /// Linha termina com `\` (quebra dura do CommonMark): a próxima linha é
     /// da mesma "família" e fica mais perto (Shift+Enter).
     pub hard_break: bool,
+    /// Régua `___`: divisória que vai até a borda da tela, não só da página.
+    pub full_rule: bool,
 }
 
 pub const TOGGLE_OPEN: &str = "▾";
@@ -197,6 +199,7 @@ fn empty_info() -> LineInfo {
         image: None,
         images: Vec::new(),
         hard_break: false,
+        full_rule: false,
     }
 }
 
@@ -351,6 +354,7 @@ fn analyze_line(line: &str, in_code: &mut bool) -> LineInfo {
     }
     if is_rule(rest) {
         info.block = Block::Rule;
+        info.full_rule = rest.trim_start().starts_with('_');
         info.hard_break = hard;
         set(&mut flags, pos..len, |f| f.hidden = true);
         info.spans = coalesce(&flags);
@@ -1078,6 +1082,8 @@ mod tests {
         assert_eq!(analyze_one("2) item").block, Block::Numbered);
         assert_eq!(analyze_one("---").block, Block::Rule);
         assert_eq!(analyze_one("---\\").block, Block::Rule);
+        assert!(!analyze_one("---").full_rule);
+        assert!(analyze_one("___").full_rule);
         assert!(analyze_one("---\\").hard_break);
         assert!(analyze_one("# Título\\").hard_break);
         assert_eq!(analyze_one("<br>").block, Block::Space);
