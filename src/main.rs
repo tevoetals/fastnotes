@@ -10,7 +10,7 @@ mod md;
 mod store;
 mod undo;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
@@ -648,6 +648,36 @@ fn render_editor(ed: &Editor<'static>, shift: &[i32], r: &mut FastRenderer<'_, '
     });
 }
 
+/// Buffers já moldados, por chave; a mesma chave pode repetir (células
+/// iguais em tabelas diferentes), então cada uma guarda uma pilha.
+struct Reuse<T>(HashMap<u64, Vec<T>>);
+
+impl<T> Reuse<T> {
+    fn new(items: impl IntoIterator<Item = (u64, T)>) -> Reuse<T> {
+        let mut m: HashMap<u64, Vec<T>> = HashMap::new();
+        for (k, v) in items {
+            m.entry(k).or_default().push(v);
+        }
+        Reuse(m)
+    }
+    fn take(&mut self, key: u64) -> Option<T> {
+        self.0.get_mut(&key)?.pop()
+    }
+    fn give(&mut self, key: u64, v: T) {
+        self.0.entry(key).or_default().push(v);
+    }
+}
+
+/// Chave de cache: hash de tudo o que define um texto já moldado. Tabelas,
+/// colunas e faixas de imagem reaproveitam o buffer quando a chave se repete,
+/// em vez de moldar de novo a cada tecla ou movimento do mouse.
+fn cache_key(parts: impl std::hash::Hash) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    parts.hash(&mut h);
+    h.finish()
+}
+
 fn prof_add(prof: &mut Option<Prof>, phase: usize, since: Instant) {
     if let Some(p) = prof {
         p.add(phase, since);
@@ -983,6 +1013,8 @@ struct Page {
     inline_imgs: Vec<InlineImg>,
     /// Linhas com imagem, desenhadas como faixas de trechos.
     img_rows: Vec<ImgRow>,
+    /// Análise Markdown das linhas da última vez (só linhas novas são analisadas).
+    line_cache: HashMap<u64, md::LineInfo>,
 }
 
 /// Imagem em linha pronta para desenhar: posição do glifo reservado e tamanho.
@@ -1004,6 +1036,7 @@ struct ImgRow {
     segs: Vec<ImgSeg>,
     /// (índice em `inline_imgs`, x, y) de cada imagem da linha.
     imgs: Vec<(usize, f32, f32)>,
+    key: u64,
 }
 
 /// Trecho de texto entre imagens (intervalo de bytes da linha crua).
@@ -1102,6 +1135,7 @@ struct TableCell {
     end: usize,
     w: f32,
     buffer: Buffer,
+    key: u64,
 }
 
 /// Célula clicável: retângulo na tela e origem do texto.
@@ -1180,6 +1214,7 @@ struct ColText {
     x: f32,
     w: f32,
     buffer: Buffer,
+    key: u64,
 }
 
 impl ColText {
@@ -1312,6 +1347,7 @@ impl Page {
             line_shift: Vec::new(),
             inline_imgs: Vec::new(),
             img_rows: Vec::new(),
+            line_cache: HashMap::new(),
         }
     }
 
@@ -1397,18 +1433,37 @@ impl Page {
     /// Reaplica os estilos Markdown em todas as linhas.
     fn restyle(&mut self, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
         let texts = self.line_texts();
-        self.lines = md::analyze(texts.iter().map(String::as_str));
+        self.lines = md::analyze_cached(texts.iter().map(String::as_str), &mut self.line_cache);
         self.line_shift = compute_shifts(&self.lines, font_px);
         let cursor_line = self.editor.cursor().line;
         self.build_columns(fs, font_px, cursor_line);
         let cursor = self.editor.cursor();
         self.build_tables(fs, font_px, cursor);
         self.build_img_rows(fs, images, font_px, cursor_line, &texts);
+        let lens: Vec<usize> = texts.iter().map(String::len).collect();
+        self.apply_attrs(images, font_px, 0..lens.len(), &lens);
+    }
+
+    /// Só os estilos das linhas `range` (a prévia de cor muda apenas a
+    /// seleção; colunas, tabelas e imagens continuam valendo).
+    fn restyle_lines(&mut self, images: &mut ImageCache, font_px: f32, range: std::ops::Range<usize>) {
+        let n = self.lines.len();
+        let range = range.start.min(n)..range.end.min(n);
+        let mut lens = vec![0; range.start];
+        lens.extend(range.clone().map(|i| self.line_text(i).len()));
+        self.apply_attrs(images, font_px, range, &lens);
+    }
+
+    /// Calcula e aplica os atributos das linhas `range` no buffer principal
+    /// (`lens[i]`: tamanho da linha `i`).
+    fn apply_attrs(&mut self, images: &mut ImageCache, font_px: f32, range: std::ops::Range<usize>, lens: &[usize]) {
+        let cursor_line = self.editor.cursor().line;
         let row_h: Vec<(usize, f32)> = self.img_rows.iter().map(|r| (r.line, r.h)).collect();
         let lines = &self.lines;
-        self.editor.with_buffer_mut(|b| {
-            for (i, info) in lines.iter().enumerate() {
-                let Some(bl) = b.lines.get_mut(i) else { break };
+        let mut out: Vec<(usize, AttrsList)> = Vec::with_capacity(range.len());
+        {
+            for i in range {
+                let Some(info) = lines.get(i) else { break };
                 let mut base = Attrs::new().family(Family::SansSerif).color(WHITE).letter_spacing(tracking(font_px));
                 let mut line_h = body_lh(font_px);
                 match info.block {
@@ -1437,20 +1492,20 @@ impl Page {
                 }
                 if info.folded || info.col.is_some() || matches!(info.block, Block::ColSep | Block::ColEnd | Block::TableSep) {
                     let tiny = Attrs::new().metrics(Metrics::new(1.0, 1.0)).color(TRANSPARENT);
-                    bl.set_attrs_list(AttrsList::new(&tiny));
+                    out.push((i, AttrsList::new(&tiny)));
                     continue;
                 }
                 if info.block == Block::Table {
                     // A linha crua fica invisível; as células são desenhadas por cima.
                     let h = self.tables.iter().find(|t| i >= t.start && i <= t.end).map(|t| t.row_h).unwrap_or(line_h);
                     let tiny = Attrs::new().metrics(Metrics::new(1.0, h)).color(TRANSPARENT);
-                    bl.set_attrs_list(AttrsList::new(&tiny));
+                    out.push((i, AttrsList::new(&tiny)));
                     continue;
                 }
                 if let Some(&(_, h)) = row_h.iter().find(|(l, _)| *l == i) {
                     // Linha com imagem: a crua fica invisível com a altura da faixa.
                     let tiny = Attrs::new().metrics(Metrics::new(1.0, h)).color(TRANSPARENT);
-                    bl.set_attrs_list(AttrsList::new(&tiny));
+                    out.push((i, AttrsList::new(&tiny)));
                     continue;
                 }
                 if info.block == Block::ColStart {
@@ -1458,14 +1513,14 @@ impl Page {
                     let h = self.columns.iter().find(|b| b.start == i).map(|b| b.height).unwrap_or(1.0);
                     let inner = lines[i + 1..].iter().take_while(|l| l.col.is_some() || matches!(l.block, Block::ColSep)).count() as f32 + 1.0;
                     let tiny = Attrs::new().metrics(Metrics::new(1.0, (h - inner).max(1.0))).color(TRANSPARENT);
-                    bl.set_attrs_list(AttrsList::new(&tiny));
+                    out.push((i, AttrsList::new(&tiny)));
                     continue;
                 }
                 let mut list = AttrsList::new(&base);
                 let preview_spans;
                 let spans: &[(std::ops::Range<usize>, md::Flags)] = match self.preview {
                     Some((a, b, c)) if i >= a.line && i <= b.line => {
-                        let len = texts[i].len();
+                        let len = lens[i];
                         let start = if i == a.line { a.index } else { 0 };
                         let end = if i == b.line { b.index } else { len };
                         preview_spans = md::recolor(&info.spans, len, start..end, c);
@@ -1477,7 +1532,14 @@ impl Page {
                 for (r, f) in spans {
                     list.add_span(r.clone(), &attrs_for(base.clone(), *f, i == cursor_line || img_missing, line_h));
                 }
-                bl.set_attrs_list(list);
+                out.push((i, list));
+            }
+        }
+        self.editor.with_buffer_mut(|b| {
+            for (i, list) in out {
+                if let Some(bl) = b.lines.get_mut(i) {
+                    bl.set_attrs_list(list);
+                }
             }
         });
     }
@@ -1516,7 +1578,7 @@ impl Page {
     /// espaço livre (os curtos primeiro) e quebram dentro dele.
     fn build_img_rows(&mut self, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32, cursor_line: usize, texts: &[String]) {
         self.inline_imgs.clear();
-        self.img_rows.clear();
+        let mut old = Reuse::new(std::mem::take(&mut self.img_rows).into_iter().map(|r| (r.key, r)));
         let text_w = if self.editor_size.0 > 0.0 { self.editor_size.0 } else { 600.0 };
         let wide_w = self.wide_w.max(text_w);
         let max_w = wide_w as u32;
@@ -1545,6 +1607,16 @@ impl Page {
                 .collect();
             let Some(sizes) = sizes else { continue };
             let text = &texts[i];
+            let key = cache_key((text, &info.spans, info.block, &sizes, i == cursor_line, font_px.to_bits(), text_w.to_bits(), wide_w.to_bits()));
+            if let Some(mut row) = old.take(key) {
+                row.line = i;
+                for (j, im) in info.images.iter().enumerate() {
+                    row.imgs[j].0 = self.inline_imgs.len();
+                    self.inline_imgs.push(InlineImg { line: i, start: im.start, end: im.end, path: im.path.clone(), w: sizes[j].0 });
+                }
+                self.img_rows.push(row);
+                continue;
+            }
             let mut ranges = Vec::new();
             let mut prev = 0;
             for im in &info.images {
@@ -1608,7 +1680,7 @@ impl Page {
                 imgs.push((self.inline_imgs.len(), img_x[j], ((h - ih as f32) / 2.0).round()));
                 self.inline_imgs.push(InlineImg { line: i, start: im.start, end: im.end, path: im.path.clone(), w });
             }
-            self.img_rows.push(ImgRow { line: i, h, w: row_w, segs, imgs });
+            self.img_rows.push(ImgRow { line: i, h, w: row_w, segs, imgs, key });
         }
     }
 
@@ -1659,7 +1731,7 @@ impl Page {
 
     /// Monta um sub-buffer por coluna de cada bloco `:::`.
     fn build_columns(&mut self, fs: &mut FontSystem, font_px: f32, cursor_line: usize) {
-        self.columns.clear();
+        let mut old = Reuse::new(std::mem::take(&mut self.columns).into_iter().flat_map(|b| b.cols).map(|c| (c.key, c)));
         let texts = self.line_texts();
         let text_w = if self.editor_size.0 > 0.0 { self.editor_size.0 } else { 600.0 };
         let gap = (font_px * 1.4).round();
@@ -1693,6 +1765,23 @@ impl Page {
                     (Some(&f), Some(&l)) => (f, l),
                     _ => (usize::MAX, usize::MAX),
                 };
+                let colw = widths[c];
+                let key = cache_key((
+                    font_px.to_bits(),
+                    colw.to_bits(),
+                    members
+                        .iter()
+                        .map(|&k| (&texts[k], &self.lines[k].spans, self.lines[k].block, self.line_shift.get(k).copied().unwrap_or(0), k == cursor_line))
+                        .collect::<Vec<_>>(),
+                ));
+                if let Some(mut col) = old.take(key) {
+                    let h = col.buffer.layout_runs().last().map(|r| r.line_top + r.line_height).unwrap_or(body_lh(font_px));
+                    max_h = max_h.max(h);
+                    (col.first, col.last, col.map, col.x) = (first, last, members, cx);
+                    cols.push(col);
+                    cx += colw + gap;
+                    continue;
+                }
                 let mut pieces: Vec<(String, Attrs<'static>)> = Vec::new();
                 let default = Attrs::new().family(Family::SansSerif).color(WHITE);
                 for (mi, &k) in members.iter().enumerate() {
@@ -1726,7 +1815,6 @@ impl Page {
                         pieces.push((String::new(), base.clone()));
                     }
                 }
-                let colw = widths[c];
                 let mut buffer = Buffer::new(fs, Metrics::new(font_px, body_lh(font_px)));
                 buffer.set_wrap(Wrap::WordOrGlyph);
                 buffer.set_tab_width(4);
@@ -1735,7 +1823,7 @@ impl Page {
                 buffer.shape_until_scroll(fs, false);
                 let h = buffer.layout_runs().last().map(|r| r.line_top + r.line_height).unwrap_or(body_lh(font_px));
                 max_h = max_h.max(h);
-                cols.push(ColText { first, last, map: members, x: cx, w: colw, buffer });
+                cols.push(ColText { first, last, map: members, x: cx, w: colw, buffer, key });
                 cx += colw + gap;
             }
             self.columns.push(ColBlock { start, end, height: max_h + pad * 2.0, gap, base, max, cols });
@@ -1748,7 +1836,7 @@ impl Page {
     /// números à direita salvo alinhamento declarado em `:---:`; se não cabe
     /// na medida, a fonte da tabela encolhe (até 55 %).
     fn build_tables(&mut self, fs: &mut FontSystem, font_px: f32, cursor: Cursor) {
-        self.tables.clear();
+        let mut old = Reuse::new(std::mem::take(&mut self.tables).into_iter().flat_map(|t| t.rows).flat_map(|r| r.cells).map(|c| (c.key, c)));
         let texts = self.line_texts();
         // Tabelas podem passar da medida do texto até a margem direita da janela.
         let text_w = if self.editor_size.0 > 0.0 { self.wide_w.max(self.editor_size.0) } else { 600.0 };
@@ -1834,21 +1922,31 @@ impl Page {
                     let mut out = Vec::new();
                     for (ci, &(a, b)) in cells.iter().enumerate() {
                         let editing = cursor_cell == Some(ci);
+                        // `mono` da linha crua não vale na célula (só `code`).
+                        let spans: Vec<(std::ops::Range<usize>, md::Flags)> = info
+                            .spans
+                            .iter()
+                            .filter_map(|(r, f)| {
+                                let (rs, re) = (r.start.max(a), r.end.min(b));
+                                (rs < re).then(|| (rs - a..re - a, md::Flags { mono: f.code, ..*f }))
+                            })
+                            .collect();
+                        let key = cache_key((&text[a..b], font.to_bits(), info.header, editing, &spans));
+                        if let Some(mut cell) = old.take(key) {
+                            cell.start = a;
+                            cell.end = b;
+                            col_w[ci] = col_w[ci].max(cell.w + 2.0 * hpad);
+                            out.push(cell);
+                            continue;
+                        }
                         let lh = body_lh(font);
                         let mut base = Attrs::new().family(Family::SansSerif).color(WHITE).letter_spacing(tracking(font)).metrics(Metrics::new(font, lh));
                         if info.header {
                             base = base.weight(Weight::SEMIBOLD);
                         }
                         let mut list = AttrsList::new(&base);
-                        for (r, f) in &info.spans {
-                            let rs = r.start.max(a);
-                            let re = r.end.min(b);
-                            if rs < re {
-                                // `mono` da linha crua não vale na célula (só `code`).
-                                let mut f = *f;
-                                f.mono = f.code;
-                                list.add_span(rs - a..re - a, &attrs_for(base.clone(), f, editing, lh));
-                            }
+                        for (r, f) in spans {
+                            list.add_span(r, &attrs_for(base.clone(), f, editing, lh));
                         }
                         let mut buffer = Buffer::new(fs, Metrics::new(font, lh));
                         buffer.set_wrap(Wrap::None);
@@ -1860,13 +1958,17 @@ impl Page {
                         buffer.shape_until_scroll(fs, false);
                         let w = buffer.layout_runs().map(|r| r.line_w).fold(0.0, f32::max).ceil();
                         col_w[ci] = col_w[ci].max(w + 2.0 * hpad);
-                        out.push(TableCell { start: a, end: b, w, buffer });
+                        out.push(TableCell { start: a, end: b, w, buffer, key });
                     }
                     rows.push(TableRow { line: *k, cells: out });
                 }
                 let total: f32 = col_w.iter().sum();
                 if total > text_w && font == font_px {
                     font = (font_px * (text_w / total).clamp(0.55, 1.0) * 2.0).round() / 2.0;
+                    // A medição na fonte cheia volta para o cache (a próxima vez a repete).
+                    for c in rows.into_iter().flat_map(|r| r.cells) {
+                        old.give(c.key, c);
+                    }
                     continue;
                 }
                 let mut col_x = Vec::with_capacity(ncols);
@@ -3846,13 +3948,23 @@ impl App {
         self.ui.labels.clear();
         self.ui.fonts_full = true;
         self.ui.fonts_loading = false;
-        for t in &mut self.ui.tabs {
-            t.editor.with_buffer_mut(|b| {
-                for l in &mut b.lines {
-                    l.reset();
-                }
-                b.set_redraw(true);
-            });
+        // Os buffers já moldados (inclusive os guardados em cache de tabelas,
+        // colunas e imagens) apontam para fontes do banco antigo: refaz tudo.
+        let fp = self.ui.font_px();
+        let Ui { font_system, images, tabs, .. } = &mut self.ui;
+        for t in tabs.iter_mut() {
+            for page in &mut t.pages {
+                page.editor.with_buffer_mut(|b| {
+                    for l in &mut b.lines {
+                        l.reset();
+                    }
+                    b.set_redraw(true);
+                });
+                page.tables.clear();
+                page.columns.clear();
+                page.img_rows.clear();
+                page.restyle(font_system, images, fp);
+            }
         }
         trace("fontes do sistema carregadas (2º plano)");
         self.request_redraw();
@@ -5365,10 +5477,20 @@ impl App {
 
     fn close_picker(&mut self) {
         self.ui.picker = None;
-        if self.ui.tab_mut().preview.take().is_some() {
-            self.ui.restyle_active();
+        if let Some((a, b, _)) = self.ui.tab_mut().preview.take() {
+            self.restyle_preview_lines(a.line..b.line + 1);
         }
         self.request_redraw();
+    }
+
+    /// Reestiliza só as linhas da prévia de cor (cada movimento do mouse na
+    /// roda chega aqui: refazer a nota inteira travava o app).
+    fn restyle_preview_lines(&mut self, range: std::ops::Range<usize>) {
+        let fp = self.ui.font_px();
+        let Ui { images, tabs, active, .. } = &mut self.ui;
+        let tab = &mut tabs[*active];
+        let cur = tab.cur;
+        tab.pages[cur].restyle_lines(images, fp, range);
     }
 
     /// Mostra a cor atual da roda na seleção, sem alterar o texto.
@@ -5377,8 +5499,13 @@ impl App {
         let tab = self.ui.tab_mut();
         let cur = tab.editor.cursor();
         let (start, end) = tab.editor.selection_bounds().unwrap_or((cur, cur));
-        tab.preview = Some((start, end, hex));
-        self.ui.restyle_active();
+        if tab.preview == Some((start, end, hex)) {
+            return;
+        }
+        let old = tab.preview.replace((start, end, hex));
+        let lo = old.map_or(start.line, |(a, _, _)| a.line.min(start.line));
+        let hi = old.map_or(end.line, |(_, b, _)| b.line.max(end.line));
+        self.restyle_preview_lines(lo..hi + 1);
         self.request_redraw();
     }
 

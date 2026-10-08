@@ -4,9 +4,11 @@
 //! escondidos para que decorações (ponto de lista, checkbox, barra de
 //! citação, separador, grade de tabela) sejam desenhadas no lugar.
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Block {
     Text,
     Heading(u8),
@@ -33,7 +35,7 @@ pub enum Block {
     Image,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
 pub struct Flags {
     pub bold: bool,
     pub italic: bool,
@@ -54,6 +56,7 @@ pub struct Flags {
     pub img: bool,
 }
 
+#[derive(Clone)]
 pub struct LineInfo {
     pub block: Block,
     pub spans: Vec<(Range<usize>, Flags)>,
@@ -100,12 +103,35 @@ impl LineInfo {
 }
 
 pub fn analyze<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<LineInfo> {
+    analyze_cached(lines, &mut HashMap::new())
+}
+
+/// Como `analyze`, reaproveitando a análise de linhas que não mudaram desde a
+/// última chamada (`cache`: hash da linha e do estado de bloco de código →
+/// resultado). A cada tecla só a linha editada é analisada de novo.
+pub fn analyze_cached<'a>(lines: impl IntoIterator<Item = &'a str>, cache: &mut HashMap<u64, LineInfo>) -> Vec<LineInfo> {
     let lines: Vec<&str> = lines.into_iter().collect();
     let mut out: Vec<LineInfo> = Vec::with_capacity(lines.len());
     let mut in_code = false;
+    let mut next: HashMap<u64, LineInfo> = HashMap::with_capacity(lines.len());
     for line in &lines {
-        out.push(analyze_line(line, &mut in_code));
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (line, in_code).hash(&mut h);
+        let key = h.finish();
+        let info = match cache.remove(&key).or_else(|| next.get(&key).cloned()) {
+            Some(info) => {
+                // Só a cerca ``` muda o estado de código.
+                if info.block == Block::Fence {
+                    in_code = !in_code;
+                }
+                info
+            }
+            None => analyze_line(line, &mut in_code),
+        };
+        next.insert(key, info.clone());
+        out.push(info);
     }
+    *cache = next;
     for i in 1..out.len() {
         if out[i].block == Block::TableSep && out[i - 1].block == Block::Table {
             out[i - 1].header = true;
