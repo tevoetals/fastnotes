@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.5.1" date="2026-10-07">
+      <description>
+        <p>Desempenho: escolher cor passando o mouse pela roda não trava mais; digitar em notas com tabelas, colunas e imagens ficou cerca de 3 vezes mais leve.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-06">
       <description>
         <p>Agenda: timers em tarefas com fila, auto-pomodoro e lembretes de eventos no PC e no Telegram. Páginas lado a lado, divisor da tela inteira e menu do botão direito.</p>
