@@ -669,6 +669,44 @@ impl<T> Reuse<T> {
     }
 }
 
+/// Tempo parado depois do qual a memória é aparada (`App::idle_trim`).
+const IDLE_TRIM: Duration = Duration::from_secs(3);
+
+/// `madvise` na maior faixa alinhada a páginas dentro de `ptr..ptr+len`.
+///
+/// # Safety
+/// A faixa precisa estar mapeada e não ser usada enquanto as páginas somem.
+unsafe fn release_pages(ptr: *mut u8, len: usize, advice: libc::c_int) {
+    let page = 4096usize;
+    let start = (ptr as usize).div_ceil(page) * page;
+    let end = (ptr as usize + len) / page * page;
+    if end > start {
+        // SAFETY: repassada ao chamador (faixa dentro de um mapeamento válido).
+        unsafe { libc::madvise(start as *mut libc::c_void, end - start, advice) };
+    }
+}
+
+/// Fontes são mapeadas do disco: as páginas já lidas (a de emoji colorido
+/// passa de 7 MB depois do seletor) contam como memória do app. Mapeadas só
+/// para leitura, podem ser soltas e voltam do cache de disco no uso.
+fn release_font_pages() {
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else { return };
+    for l in maps.lines() {
+        let mut it = l.split_whitespace();
+        let (Some(range), Some(perms)) = (it.next(), it.next()) else { continue };
+        let path = it.nth(3).unwrap_or("");
+        let font = [".ttf", ".otf", ".ttc", ".TTF", ".OTF"].iter().any(|e| path.ends_with(e));
+        if !font || !perms.starts_with("r-") {
+            continue;
+        }
+        let Some((a, b)) = range.split_once('-') else { continue };
+        let (Ok(a), Ok(b)) = (usize::from_str_radix(a, 16), usize::from_str_radix(b, 16)) else { continue };
+        // SAFETY: mapeamento de arquivo só de leitura: as páginas soltas são
+        // relidas do arquivo, iguais, no próximo acesso.
+        unsafe { release_pages(a as *mut u8, b - a, libc::MADV_DONTNEED) };
+    }
+}
+
 /// Chave de cache: hash de tudo o que define um texto já moldado. Tabelas,
 /// colunas e faixas de imagem reaproveitam o buffer quando a chave se repete,
 /// em vez de moldar de novo a cada tecla ou movimento do mouse.
@@ -1663,9 +1701,9 @@ impl Page {
                 .images
                 .iter()
                 .map(|im| {
-                    images.get(&im.path).map(|bm| {
-                        let w = im.width.unwrap_or(bm.w.min(max_w)).clamp(IMG_MIN_W, max_w.max(IMG_MIN_W));
-                        (w, (bm.h as u64 * w as u64 / bm.w.max(1) as u64).max(1) as u32)
+                    images.get(&im.path).map(|(bw, bh)| {
+                        let w = im.width.unwrap_or(bw.min(max_w)).clamp(IMG_MIN_W, max_w.max(IMG_MIN_W));
+                        (w, (bh as u64 * w as u64 / bw.max(1) as u64).max(1) as u32)
                     })
                 })
                 .collect();
@@ -2200,6 +2238,8 @@ struct Ui {
     traced: bool,
     prof: Option<Prof>,
     labels: Vec<(LabelKey, Buffer)>,
+    /// Aba para a qual a memória foi aparada pela última vez (`trim_memory`).
+    mem_tab: usize,
     glyphs: Option<Glyphs>,
     images: ImageCache,
 
@@ -2539,6 +2579,10 @@ impl Ui {
     }
 
     fn paint(&mut self, canvas: &mut Canvas) {
+        if self.mem_tab != self.active {
+            self.mem_tab = self.active;
+            self.trim_memory(false);
+        }
         let t = |ui: &Ui, l: &str| if !ui.traced { trace(l) };
         t(self, "paint: início");
         let mut pt = Instant::now();
@@ -3102,6 +3146,37 @@ impl Ui {
         }
         self.labels.push((key, b));
         w
+    }
+
+    /// Solta o que não está na tela: imagens de outras abas (refeitas do
+    /// disco se voltarem), o layout de texto das abas escondidas e, com
+    /// `glyphs`, as imagens de glifos rasterizados (emoji colorido ocupa
+    /// muito). Depois devolve ao sistema a memória livre do processo.
+    fn trim_memory(&mut self, glyphs: bool) {
+        let active = self.active;
+        let keep: HashSet<&str> = self.tabs[active].pages.iter().flat_map(|p| p.lines.iter()).flat_map(|l| l.images.iter()).map(|im| im.path.as_str()).collect();
+        self.images.retain(&keep);
+        for (ti, tab) in self.tabs.iter_mut().enumerate() {
+            if ti == active {
+                continue;
+            }
+            for page in &mut tab.pages {
+                page.editor.with_buffer_mut(|b| {
+                    for l in &mut b.lines {
+                        l.reset_shaping();
+                    }
+                    b.set_redraw(true);
+                });
+            }
+        }
+        if glyphs {
+            self.swash = SwashCache::new();
+            release_font_pages();
+        }
+        // SAFETY: só devolve ao sistema páginas livres do alocador (glibc).
+        unsafe {
+            libc::malloc_trim(0);
+        }
     }
 
     /// Rótulo em pedaços alinhado à direita em `right`: `(texto, volátil)`;
@@ -3787,6 +3862,11 @@ struct App {
     slot_gen: [u64; 3],
     /// Degraus de progresso dos timers rodando no último quadro inteiro.
     timer_sig: u64,
+    /// Quadro do pool que está na tela (o último enviado).
+    shown_slot: usize,
+    /// Último quadro inteiro desenhado e o timer que apara a memória depois de um tempo parado.
+    last_draw: Instant,
+    idle_token: Option<RegistrationToken>,
     pending_token: Option<String>,
     modifiers: Modifiers,
     last_serial: u32,
@@ -3899,6 +3979,7 @@ fn main() {
         traced: false,
         prof: Prof::new(),
         labels: Vec::new(),
+        mem_tab: usize::MAX,
         glyphs: None,
         images: ImageCache::new(store.base_dir.clone()),
         store,
@@ -3964,6 +4045,9 @@ fn main() {
         body_gen: 0,
         slot_gen: [u64::MAX; 3],
         timer_sig: 0,
+        shown_slot: 0,
+        last_draw: Instant::now(),
+        idle_token: None,
         pending_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
         modifiers: Modifiers::default(),
         last_serial: 0,
@@ -4232,8 +4316,12 @@ impl App {
                 window.wl_surface().set_opaque_region(Some(region.wl_region()));
             }
         }
-        let mut chosen = None;
-        for (i, slot) in buffers.iter().enumerate().take(2) {
+        // O quadro que está na tela, se o compositor já o devolveu (com wl_shm
+        // ele copia na hora): já tem o conteúdo atual, então o tique do timer
+        // só repinta o rodapé, e o outro quadro pode ficar sem memória.
+        let shown = self.shown_slot;
+        let mut chosen = buffers[shown].as_ref().filter(|b| pool.canvas(*b).is_some()).map(|_| shown);
+        for (i, slot) in buffers.iter().enumerate().take(2).filter(|_| chosen.is_none()) {
             let free = match slot {
                 None => true,
                 Some(b) => pool.canvas(b).is_some(),
@@ -4305,10 +4393,52 @@ impl App {
         buf.attach_to(surface).expect("attach");
         window.commit();
         self.frame_pending = true;
+        self.shown_slot = i;
+        if !footer_only {
+            self.last_draw = Instant::now();
+        }
+        if self.idle_token.is_none() {
+            self.idle_token = self
+                .loop_handle
+                .insert_source(Timer::from_duration(IDLE_TRIM), |_, _, app| {
+                    let quiet = app.last_draw.elapsed();
+                    if quiet < IDLE_TRIM {
+                        return TimeoutAction::ToDuration(IDLE_TRIM - quiet);
+                    }
+                    app.idle_token = None;
+                    app.idle_trim();
+                    TimeoutAction::Drop
+                })
+                .ok();
+        }
         self.needs_redraw = false;
         if self.first_draw {
             self.first_draw = false;
             trace("primeiro quadro enviado");
+        }
+    }
+
+    /// Parado há `IDLE_TRIM`: devolve ao sistema o quadro que não está na tela
+    /// (refeito no próximo desenho), as páginas lidas dos arquivos de fonte
+    /// (relidas do cache de disco quando preciso) e a memória livre do alocador.
+    fn idle_trim(&mut self) {
+        let App { pool, buffers, slot_gen, shown_slot, .. } = self;
+        for (j, slot) in buffers.iter().enumerate() {
+            let Some(b) = slot else { continue };
+            if j == *shown_slot || b.canvas(pool).is_none() {
+                continue;
+            }
+            let data = pool.raw_data_mut(&b.slot());
+            // SAFETY: faixa alinhada a páginas dentro do quadro mapeado, que o
+            // compositor já devolveu; depois disso ela é lida como zeros e o
+            // quadro é marcado para ser redesenhado por inteiro.
+            unsafe { release_pages(data.as_mut_ptr(), data.len(), libc::MADV_REMOVE) };
+            slot_gen[j] = u64::MAX;
+        }
+        release_font_pages();
+        // SAFETY: só devolve ao sistema páginas livres do alocador (glibc).
+        unsafe {
+            libc::malloc_trim(0);
         }
     }
 
@@ -5252,6 +5382,9 @@ impl App {
 
     fn close_glyphs(&mut self) {
         self.ui.glyphs = None;
+        // Os emoji do seletor (rótulos grandes e bitmaps coloridos) saem da memória.
+        self.ui.labels.retain(|(k, _)| k.size != 22f32.to_bits() && k.size != 20f32.to_bits());
+        self.ui.trim_memory(true);
         self.wake_cursor();
         self.request_redraw();
     }
@@ -7371,6 +7504,7 @@ impl App {
                 let h = &self.ui.hits.images[i];
                 let (line, start, end) = (h.line, h.start, h.end);
                 self.img_drag = Some(ImgDrag { line, start, end, w0: h.rect.w, h0: h.rect.h, x0: px, y0: py, edge });
+                self.ui.images.set_resizing(true);
                 self.select_image(line, start, end);
                 self.ui.tab_mut().undo.hold();
                 self.set_cursor_icon(Self::edge_icon(edge));
@@ -7521,6 +7655,7 @@ impl App {
             return;
         }
         if button == BTN_LEFT && self.img_drag.take().is_some() {
+            self.ui.images.set_resizing(false);
             self.ui.tab_mut().undo.release();
             self.on_pointer_motion();
             return;

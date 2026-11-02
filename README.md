@@ -558,12 +558,17 @@ flatpak run io.github.tevoetals.fastnotes
 
 ## Consumo de recursos
 
-- **Memória:** a janela usa dois quadros em memória compartilhada (`wl_shm`),
-  2,5 MB cada numa janela de 956×666; um terceiro só se o compositor segurar
-  os dois. O pool é recriado a cada mudança de tamanho, então nunca cresce.
-  As fontes curadas (Noto) ficam mapeadas do disco; o banco completo de fontes
-  do sistema só é carregado se uma nota tiver caracteres fora delas (CJK,
-  árabe, hebraico…) e, nesse caso, a memória compartilhada de arquivos sobe.
+- **Memória:** ~10–15 MB parado numa janela de 1920×1050 com várias abas
+  (o Monitor do Sistema mostra a soma: memória própria + quadros da janela +
+  páginas de fontes lidas do disco). Imagens: só o tamanho (lido do cabeçalho,
+  sem decodificar) e a cópia na largura em que aparecem; o original
+  decodificado (4–6 MB por foto) só fica durante um redimensionamento, e as
+  imagens de outras abas saem da memória ao trocar de aba. Depois de 3 s sem
+  redesenhar a janela, o quadro que não está na tela, as páginas das fontes
+  (a de emoji colorido passa de 7 MB depois do seletor) e a memória livre do
+  alocador voltam para o sistema; tudo volta sozinho no próximo uso. O banco
+  completo de fontes do sistema só é carregado se uma nota tiver caracteres
+  fora das fontes curadas (CJK, árabe, hebraico…).
 - **CPU:** zero parado. Cada tecla custa ~0,5 ms de layout e ~2–3 ms de
   desenho numa nota pesada (3 páginas, tabelas, colunas e imagens): só as
   linhas alteradas são analisadas e estilizadas de novo, e tabelas, colunas e

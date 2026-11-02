@@ -111,17 +111,25 @@ pub fn resize(src: &Bitmap, tw: u32, th: u32) -> Bitmap {
 }
 
 /// Cache de imagens decodificadas e de versões redimensionadas para a tela.
+/// Cache de imagens enxuto: guarda só o tamanho de cada imagem (lido do
+/// cabeçalho, sem decodificar) e a versão na largura em que aparece na tela.
+/// O original decodificado (4–6 MB numa foto de 1600 px) não fica guardado,
+/// salvo o da última imagem redimensionada (arrastar a borda pede vários
+/// tamanhos seguidos).
 pub struct ImageCache {
     pub base: PathBuf,
-    decoded: HashMap<String, Option<Rc<Bitmap>>>,
-    scaled: HashMap<(String, u32), Rc<Bitmap>>,
+    dims: HashMap<String, Option<(u32, u32)>>,
+    scaled: HashMap<String, Rc<Bitmap>>,
+    orig: Option<(String, Rc<Bitmap>)>,
+    /// Redimensionamento pelo mouse em curso: mantém o original entre os quadros.
+    pub resizing: bool,
     /// Prévia de arraste (meia opacidade, pouca cor) da última imagem arrastada.
     ghost: Option<((String, u32), Rc<Bitmap>)>,
 }
 
 impl ImageCache {
     pub fn new(base: PathBuf) -> ImageCache {
-        ImageCache { base, decoded: HashMap::new(), scaled: HashMap::new(), ghost: None }
+        ImageCache { base, dims: HashMap::new(), scaled: HashMap::new(), orig: None, resizing: false, ghost: None }
     }
 
     pub fn resolve(&self, path: &str) -> PathBuf {
@@ -132,21 +140,52 @@ impl ImageCache {
         if p.is_absolute() { p.to_path_buf() } else { self.base.join(p) }
     }
 
-    pub fn get(&mut self, path: &str) -> Option<Rc<Bitmap>> {
-        if let Some(v) = self.decoded.get(path) {
-            return v.clone();
+    /// Largura e altura originais (`None`: arquivo faltando ou ilegível).
+    pub fn get(&mut self, path: &str) -> Option<(u32, u32)> {
+        if let Some(v) = self.dims.get(path) {
+            return *v;
         }
-        let full = self.resolve(path);
-        let bm = std::fs::read(full).ok().and_then(|b| decode(&b)).map(Rc::new);
-        self.decoded.insert(path.to_string(), bm.clone());
-        bm
+        let d = std::fs::read(self.resolve(path)).ok().and_then(|b| probe(&b));
+        self.dims.insert(path.to_string(), d);
+        d
+    }
+
+    fn original(&mut self, path: &str) -> Option<Rc<Bitmap>> {
+        if let Some((p, bm)) = &self.orig {
+            if p == path {
+                return Some(bm.clone());
+            }
+        }
+        let bm = Rc::new(std::fs::read(self.resolve(path)).ok().and_then(|b| decode(&b))?);
+        self.dims.insert(path.to_string(), Some((bm.w, bm.h)));
+        self.orig = Some((path.to_string(), bm.clone()));
+        Some(bm)
     }
 
     /// Esquece uma imagem (depois de regravar o arquivo, por exemplo).
     pub fn forget(&mut self, path: &str) {
-        self.decoded.remove(path);
-        self.scaled.retain(|(p, _), _| p != path);
+        self.dims.remove(path);
+        self.scaled.remove(path);
+        if self.orig.as_ref().is_some_and(|(p, _)| p == path) {
+            self.orig = None;
+        }
         self.ghost = None;
+    }
+
+    /// Solta tudo o que não é das imagens `keep` (as da aba atual) e o
+    /// original guardado. As outras são refeitas do disco se voltarem à tela.
+    pub fn retain(&mut self, keep: &std::collections::HashSet<&str>) {
+        self.scaled.retain(|p, _| keep.contains(p.as_str()));
+        self.orig = None;
+        self.ghost = None;
+    }
+
+    /// Início/fim de um redimensionamento pelo mouse.
+    pub fn set_resizing(&mut self, on: bool) {
+        self.resizing = on;
+        if !on {
+            self.orig = None;
+        }
     }
 
     /// Prévia de arraste: 50 % de opacidade e 30 % da cor original, calculada
@@ -174,23 +213,49 @@ impl ImageCache {
         Some(g)
     }
 
-    /// Versão redimensionada para caber em `width` px (nunca amplia).
+    /// Versão em `width` px de largura (nunca amplia). Uma só por imagem.
     pub fn scaled(&mut self, path: &str, width: u32) -> Option<Rc<Bitmap>> {
-        let bm = self.get(path)?;
-        let tw = width.max(1);
-        if tw == bm.w {
-            return Some(bm);
+        let (w0, _) = self.get(path)?;
+        let tw = width.clamp(1, w0.max(1));
+        if let Some(s) = self.scaled.get(path) {
+            if s.w == tw {
+                return Some(s.clone());
+            }
         }
-        let key = (path.to_string(), tw);
-        if let Some(s) = self.scaled.get(&key) {
-            return Some(s.clone());
+        let bm = self.original(path)?;
+        let s = if tw == bm.w {
+            bm.clone()
+        } else {
+            let th = (bm.h as u64 * tw as u64 / bm.w as u64).max(1) as u32;
+            Rc::new(resize(&bm, tw, th))
+        };
+        self.scaled.insert(path.to_string(), s.clone());
+        // Sem redimensionamento em curso, o original sai logo da memória.
+        if !self.resizing {
+            self.orig = None;
         }
-        let th = (bm.h as u64 * tw as u64 / bm.w as u64).max(1) as u32;
-        let s = Rc::new(resize(&bm, tw, th));
-        self.scaled.insert(key, s.clone());
         Some(s)
     }
+}
 
+/// Largura e altura lidas do cabeçalho (PNG, JPEG, WebP), sem decodificar.
+pub fn probe(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.starts_with(b"\x89PNG") && bytes.len() >= 24 {
+        let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+        return (w > 0 && h > 0).then_some((w, h));
+    }
+    if bytes.starts_with(&[0xff, 0xd8]) {
+        let mut d = zune_jpeg::JpegDecoder::new(bytes);
+        d.decode_headers().ok()?;
+        let i = d.info()?;
+        return Some((i.width as u32, i.height as u32));
+    }
+    if bytes.len() > 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        let d = image_webp::WebPDecoder::new(Cursor::new(bytes)).ok()?;
+        return Some(d.dimensions());
+    }
+    None
 }
 
 /// Converte bytes de imagem para WebP (reduzindo a 1600 px de largura) e grava
