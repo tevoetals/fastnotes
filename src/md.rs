@@ -33,6 +33,8 @@ pub enum Block {
     ColEnd,
     /// `![alt](caminho)` sozinho na linha.
     Image,
+    /// Cerca ```desenho que abre um desenho (o resto do bloco fica escondido).
+    Draw,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
@@ -89,6 +91,9 @@ pub struct LineInfo {
     pub timer: Option<crate::agenda::TimerMark>,
     /// Evento com data (`📅 07/10 14:30`): o relógio da agenda olha só isto.
     pub event: Option<crate::agenda::EventMark>,
+    /// Linha dentro de um desenho (da cerca de abertura à de fecho): a linha
+    /// da cerca de abertura.
+    pub draw: Option<usize>,
 }
 
 pub const TOGGLE_OPEN: &str = "▾";
@@ -100,7 +105,7 @@ pub const MAX_COLS: u8 = 4;
 impl LineInfo {
     /// Linha estrutural (`:::`, `|||`) ou dobrada: o cursor não deve parar nela.
     pub fn skip_cursor(&self) -> bool {
-        self.folded || matches!(self.block, Block::ColStart | Block::ColSep | Block::ColEnd | Block::TableSep)
+        self.folded || self.draw.is_some() || matches!(self.block, Block::ColStart | Block::ColSep | Block::ColEnd | Block::TableSep)
     }
 }
 
@@ -145,11 +150,12 @@ pub fn analyze_reuse<'a>(lines: impl IntoIterator<Item = &'a str>, prev: Vec<Lin
         let info = match reuse {
             // As linhas de colunas foram trocadas pela versão estrutural no
             // passo abaixo: essas são analisadas de novo (são poucas).
-            Some(mut info) if !matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd) => {
+            Some(mut info) if !matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd | Block::Draw) => {
                 // Campos que o passo abaixo recalcula.
                 info.header = false;
                 info.col = None;
                 info.folded = false;
+                info.draw = None;
                 if info.block == Block::Fence {
                     in_code = !in_code;
                 }
@@ -165,11 +171,25 @@ pub fn analyze_reuse<'a>(lines: impl IntoIterator<Item = &'a str>, prev: Vec<Lin
             out[i - 1].header = true;
         }
     }
+    // Desenhos: da cerca ```desenho até a cerca que fecha o bloco.
+    let mut i = 0;
+    while i < out.len() {
+        if out[i].block == Block::Fence && lines[i].trim_start().starts_with(crate::draw::FENCE) {
+            let end = (i + 1..out.len()).find(|&j| out[j].block == Block::Fence).unwrap_or(out.len() - 1);
+            out[i].block = Block::Draw;
+            for info in &mut out[i..=end] {
+                info.draw = Some(i);
+            }
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
     // Colunas: `:::` abre, `|||` separa, `:::` fecha.
     let mut start: Option<usize> = None;
     let mut col: u8 = 0;
     for i in 0..out.len() {
-        if matches!(out[i].block, Block::Code | Block::Fence) {
+        if matches!(out[i].block, Block::Code | Block::Fence | Block::Draw) {
             continue;
         }
         let t = lines[i].trim();
@@ -258,6 +278,7 @@ fn empty_info() -> LineInfo {
         full_rule: false,
         timer: None,
         event: None,
+        draw: None,
     }
 }
 

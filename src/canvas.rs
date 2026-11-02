@@ -235,6 +235,15 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    /// Só o contorno de um retângulo (espessura `t`), sem preencher o miolo.
+    pub fn stroke_rect(&mut self, x: i32, y: i32, w: i32, h: i32, t: i32, c: Color) {
+        let t = t.max(1).min(w / 2).min(h / 2).max(1);
+        self.rect(x, y, w, t, c);
+        self.rect(x, y + h - t, w, t, c);
+        self.rect(x, y + t, t, h - 2 * t, c);
+        self.rect(x + w - t, y + t, t, h - 2 * t, c);
+    }
+
     /// Contorno arredondado de 1px (desenha o cheio e recorta o interior).
     pub fn rounded_outline(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, c: Color, fill: Color) {
         self.rounded_rect(x, y, w, h, radius, c);

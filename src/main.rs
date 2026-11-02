@@ -5,6 +5,7 @@
 
 mod agenda;
 mod canvas;
+mod draw;
 mod img;
 mod md;
 mod store;
@@ -167,7 +168,7 @@ fn compute_shifts(lines: &[md::LineInfo], font_px: f32) -> Vec<i32> {
         .iter()
         .map(|l| {
             if !l.hard_break
-                || matches!(l.block, Block::Table | Block::TableSep | Block::Space | Block::Image | Block::ColStart | Block::ColSep | Block::ColEnd | Block::Fence | Block::Code)
+                || matches!(l.block, Block::Table | Block::TableSep | Block::Space | Block::Image | Block::ColStart | Block::ColSep | Block::ColEnd | Block::Fence | Block::Code | Block::Draw)
             {
                 return 0;
             }
@@ -199,7 +200,7 @@ fn tracking(size_px: f32) -> f32 {
 }
 
 /// Menu `/`: (rótulo, chave, palavras para busca).
-const SLASH_ITEMS: [(&str, &str, &str); 20] = [
+const SLASH_ITEMS: [(&str, &str, &str); 21] = [
     ("Título 1", "h1", "titulo heading h1"),
     ("Título 2", "h2", "titulo heading h2"),
     ("Título 3", "h3", "titulo heading h3"),
@@ -214,6 +215,7 @@ const SLASH_ITEMS: [(&str, &str, &str); 20] = [
     ("Divisor", "hr", "divisor linha separador"),
     ("Divisor da tela inteira", "hrfull", "divisor linha separador tela inteira master largura"),
     ("Página ao lado", "page", "pagina nova lado coluna horizontal"),
+    ("Desenho", "draw", "desenho excalidraw quadro seta caixa circulo diagrama rabisco"),
     ("Tabela", "table", "tabela table"),
     ("2 colunas", "col2", "colunas 2 duas"),
     ("3 colunas", "col3", "colunas 3 tres"),
@@ -224,7 +226,7 @@ const SLASH_ITEMS: [(&str, &str, &str); 20] = [
 
 /// Ações do menu do botão direito: (rótulo, atalho, chave, palavras de
 /// busca, só com seleção).
-const CTX_ITEMS: [(&str, &str, &str, &str, bool); 29] = [
+const CTX_ITEMS: [(&str, &str, &str, &str, bool); 30] = [
     ("Copiar", "Ctrl+C", "copy", "copiar copy", true),
     ("Recortar", "Ctrl+X", "cut", "recortar cortar cut", true),
     ("Colar", "Ctrl+V", "paste", "colar paste", false),
@@ -254,6 +256,7 @@ const CTX_ITEMS: [(&str, &str, &str, &str, bool); 29] = [
     ("Emoji", "Ctrl+.", "emoji", "emoji carinha", false),
     ("Divisor da tela inteira", "Ctrl+-", "hrfull", "divisor regua linha tela inteira", false),
     ("Página ao lado", "Ctrl+Alt+N", "page", "pagina nova lado", false),
+    ("Desenho", "", "draw", "desenho excalidraw quadro seta caixa circulo diagrama", false),
 ];
 
 /// Menu do botão direito: busca no topo, setas/mouse para escolher.
@@ -1042,6 +1045,11 @@ struct Page {
     attr_keys: Vec<u64>,
     /// Chave do que define o layout das tabelas da última vez (`build_tables`).
     tables_key: u64,
+    /// Desenhos (blocos ```desenho) desta página.
+    draws: Vec<DrawBlock>,
+    /// Desenho em edição: (linha da cerca, altura atual em unidades), que pode
+    /// mudar antes de ir para o texto (arrastando a borda de baixo).
+    draw_live: Option<(usize, f32)>,
     editor_size: (f32, f32),
     /// Largura disponível para tabelas: da coluna de texto até a margem direita.
     wide_w: f32,
@@ -1065,6 +1073,18 @@ struct Page {
 }
 
 /// Imagem em linha pronta para desenhar: posição do glifo reservado e tamanho.
+/// Bloco ```desenho: da cerca de abertura (`start`) à de fecho (`end`).
+struct DrawBlock {
+    start: usize,
+    end: usize,
+    doc: draw::Doc,
+}
+
+/// Escala do desenho: px por unidade (1 unidade = 1 px no zoom padrão).
+fn draw_unit(font_px: f32) -> f32 {
+    font_px / ZOOM_DEFAULT as f32
+}
+
 struct InlineImg {
     line: usize,
     start: usize,
@@ -1418,6 +1438,8 @@ impl Page {
             tables_fmt: HashSet::new(),
             attr_keys: Vec::new(),
             tables_key: 0,
+            draws: Vec::new(),
+            draw_live: None,
         }
     }
 
@@ -1513,6 +1535,7 @@ impl Page {
         let cursor = self.editor.cursor();
         self.build_tables(fs, font_px, cursor, &texts);
         self.build_img_rows(fs, images, font_px, cursor_line, &texts);
+        self.build_draws(&texts);
         self.apply_attrs(images, font_px, 0..texts.len(), &texts);
     }
 
@@ -1549,6 +1572,7 @@ impl Page {
                 let img_missing = info.images.iter().any(|im| images.get(&im.path).is_none());
                 let tbl_h = (info.block == Block::Table).then(|| self.tables.iter().find(|t| i >= t.start && i <= t.end).map(|t| t.row_h.to_bits()));
                 let img_h = row_h.iter().find(|(l, _)| *l == i).map(|(_, h)| h.to_bits());
+                let draw_h = info.draw.map(|s| if s == i { self.draw_height(i, font_px).to_bits() } else { 0 });
                 let col_h = (info.block == Block::ColStart).then(|| {
                     let inner = lines[i + 1..].iter().take_while(|l| l.col.is_some() || matches!(l.block, Block::ColSep)).count();
                     (self.columns.iter().find(|b| b.start == i).map(|b| b.height.to_bits()), inner)
@@ -1559,7 +1583,7 @@ impl Page {
                     info.block,
                     (info.folded, info.col),
                     self.line_shift.get(i).copied().unwrap_or(0),
-                    (tbl_h, img_h, col_h),
+                    (tbl_h, img_h, col_h, draw_h),
                     preview_part,
                     (i == cursor_line, img_missing, font_px.to_bits()),
                 ));
@@ -1593,7 +1617,14 @@ impl Page {
                     line_h -= 2.0 * shift as f32;
                     base = base.metrics(Metrics::new(fsize, line_h));
                 }
-                if info.folded || info.col.is_some() || matches!(info.block, Block::ColSep | Block::ColEnd | Block::TableSep) {
+                if info.block == Block::Draw {
+                    // A cerca ocupa a altura do desenho; o resto do bloco some.
+                    let h = self.draw_height(i, font_px).max(1.0);
+                    let tiny = Attrs::new().metrics(Metrics::new(1.0, h)).color(TRANSPARENT);
+                    out.push((i, AttrsList::new(&tiny)));
+                    continue;
+                }
+                if info.folded || info.col.is_some() || info.draw.is_some() || matches!(info.block, Block::ColSep | Block::ColEnd | Block::TableSep) {
                     let tiny = Attrs::new().metrics(Metrics::new(1.0, 1.0)).color(TRANSPARENT);
                     out.push((i, AttrsList::new(&tiny)));
                     continue;
@@ -1646,6 +1677,42 @@ impl Page {
         });
     }
 
+    /// Linhas reescritas por uma alteração (apagar + inserir) voltam com o
+    /// estilo padrão do editor, mesmo com o texto igual: a chave de estilo
+    /// delas é esquecida para `apply_attrs` refazer.
+    fn touch_lines(&mut self, ch: &Change) {
+        for it in &ch.items {
+            let a = it.start.line.min(it.end.line);
+            let b = it.start.line.max(it.end.line) + it.text.matches('\n').count();
+            for k in self.attr_keys.iter_mut().skip(a).take(b + 1 - a) {
+                *k = 0;
+            }
+        }
+    }
+
+    /// Lê os blocos ```desenho da página.
+    fn build_draws(&mut self, texts: &[String]) {
+        self.draws.clear();
+        for (i, info) in self.lines.iter().enumerate() {
+            if info.block != Block::Draw {
+                continue;
+            }
+            let end = (i..self.lines.len()).take_while(|&j| self.lines[j].draw == Some(i)).last().unwrap_or(i);
+            let body_end = if end > i && self.lines[end].block == Block::Fence { end } else { end + 1 };
+            let body: Vec<&str> = texts[i + 1..body_end.max(i + 1)].iter().map(String::as_str).collect();
+            self.draws.push(DrawBlock { start: i, end, doc: draw::Doc::parse(&texts[i], &body) });
+        }
+    }
+
+    /// Altura (px) do desenho que começa na linha `start`.
+    fn draw_height(&self, start: usize, font_px: f32) -> f32 {
+        let units = match self.draw_live {
+            Some((l, h)) if l == start => h,
+            _ => self.draws.iter().find(|d| d.start == start).map_or(draw::DEFAULT_H, |d| d.doc.height),
+        };
+        (units * draw_unit(font_px)).round()
+    }
+
     /// Trecho `a..b` da linha `info` como buffer próprio (estilos do Markdown).
     #[allow(clippy::too_many_arguments)]
     fn seg_buffer(fs: &mut FontSystem, text: &str, info: &md::LineInfo, a: usize, b: usize, editing: bool, font_px: f32, width: Option<f32>) -> Buffer {
@@ -1692,6 +1759,7 @@ impl Page {
             if info.images.is_empty()
                 || info.folded
                 || info.col.is_some()
+                || info.draw.is_some()
                 || matches!(info.block, Block::Table | Block::TableSep | Block::ColStart | Block::ColSep | Block::ColEnd | Block::Fence | Block::Code)
             {
                 continue;
@@ -2187,7 +2255,46 @@ struct Hits {
     page_grips: Vec<Rect>,
     /// Botão "+" depois da última página.
     page_add: Rect,
+    /// Desenhos da página atual: área na tela, linha da cerca, px por unidade.
+    draws: Vec<(Rect, usize, f32)>,
+    /// Botões da barra e do painel do desenho em edição.
+    draw_btns: Vec<(Rect, DrawBtn)>,
+    /// Barra e painel do desenho em edição (cliques ali não desenham).
+    draw_panels: Vec<Rect>,
 }
+
+/// Botões da barra de ferramentas e do painel de propriedades do desenho.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DrawBtn {
+    Tool(draw::Tool),
+    Lock,
+    Done,
+    DeleteBlock,
+    Stroke(u32),
+    Bg(Option<u32>),
+    Fill(draw::Fill),
+    Width(f32),
+    Dash(draw::Dash),
+    Round(bool),
+    Start(draw::Head),
+    End(draw::Head),
+    Font(f32),
+    Opacity(u8),
+    Front,
+    Back,
+    Dup,
+    Del,
+}
+
+/// Desenho em edição: aba, página e o editor (ferramenta, seleção, arraste).
+struct DrawEdit {
+    tab: usize,
+    page: usize,
+    ed: draw::Editor,
+}
+
+/// Cor de destaque do desenho (seleção, ferramenta ativa).
+const DRAW_ACCENT: u32 = 0x8f8cf0;
 
 enum Deco {
     Tri { rect: Rect, open: bool, line: usize, idx: usize },
@@ -2240,6 +2347,10 @@ struct Ui {
     labels: Vec<(LabelKey, Buffer)>,
     /// Aba para a qual a memória foi aparada pela última vez (`trim_memory`).
     mem_tab: usize,
+    /// Desenho em edição.
+    draw_ed: Option<DrawEdit>,
+    /// Textos de desenhos já moldados: (chave, buffer, largura).
+    draw_texts: Vec<(u64, Buffer, f32)>,
     glyphs: Option<Glyphs>,
     images: ImageCache,
 
@@ -2376,6 +2487,7 @@ impl Ui {
         let texts = tab.line_texts();
         let is_table = |i: usize| matches!(tab.lines.get(i).map(|l| l.block), Some(Block::Table | Block::TableSep));
         let mut any = false;
+        let mut touched = Vec::new();
         let mut i = 0;
         while i < texts.len() {
             if !is_table(i) {
@@ -2409,6 +2521,7 @@ impl Ui {
                 }
                 tab.editor.delete_range(Cursor::new(li, 0), Cursor::new(li, texts[li].len()));
                 tab.editor.insert_at(Cursor::new(li, 0), new, None);
+                touched.push(li);
                 any = true;
             }
             if let Some(ch) = tab.editor.finish_change() {
@@ -2417,6 +2530,12 @@ impl Ui {
                 }
             }
             i = j;
+        }
+        // Linhas reescritas voltam com o estilo padrão: refazer o estilo delas.
+        for li in touched {
+            if let Some(k) = tab.attr_keys.get_mut(li) {
+                *k = 0;
+            }
         }
         any
     }
@@ -2635,7 +2754,7 @@ impl Ui {
         let text_h = (editor.h - mt).max(self.px(20.0)) as f32;
         let line_height = body_lh(font_px) as i32;
         let (zoom, scale) = (self.zoom, self.scale);
-        let focused = self.focused && self.cursor_visible && !self.list_open;
+        let focused = self.focused && self.cursor_visible && !self.list_open && self.draw_ed.is_none();
         let cursor_w = self.px(2.0).max(1);
         let ox_base = editor.x + ml;
         let oy = editor.y + mt;
@@ -2669,6 +2788,7 @@ impl Ui {
         let mut img_hits = Vec::new();
         let mut seg_hits: Vec<SegHit> = Vec::new();
         let mut full_rules: Vec<(i32, i32)> = Vec::new();
+        let mut draw_places: Vec<(usize, usize, Rect)> = Vec::new();
         let div_active = self.col_div_active();
         {
             let Ui { font_system, swash, tabs, active, traced, images, prof, img_sel, img_hover, img_ghost, .. } = self;
@@ -2936,6 +3056,20 @@ impl Ui {
             if is_cur && !sel_shown {
                 *img_sel = None;
             }
+            // ---- desenhos: posição na tela (desenhados depois, com o texto) ----
+            if !tab.draws.is_empty() {
+                let tops: Vec<(usize, i32)> = tab.editor.with_buffer(|b| {
+                    b.layout_runs().filter(|r| tab.draws.iter().any(|d| d.start == r.line_i)).map(|r| (r.line_i, r.line_top as i32)).collect()
+                });
+                for (bi, d) in tab.draws.iter().enumerate() {
+                    let Some(&(_, top)) = tops.iter().find(|(l, _)| *l == d.start) else { continue };
+                    let h = tab.draw_height(d.start, font_px) as i32;
+                    let rect = Rect::new(ox, oy + top, text_w as i32, h);
+                    if rect.intersect(&editor).h > 0 {
+                        draw_places.push((pi, bi, rect));
+                    }
+                }
+            }
             // Prévia da imagem sendo arrastada: 50 % de opacidade e menos saturada,
             // no ponto onde ela cairia.
             if let Some(g) = img_ghost.as_ref().filter(|_| is_cur) {
@@ -2987,6 +3121,7 @@ impl Ui {
             prof_add(prof, P_DECOS, pt);
             pt = Instant::now();
         }
+        let (draw_hits, draw_btns, draw_panels) = self.paint_draws(canvas, &draw_places, editor);
         // Réguas `___`: de margem a margem da janela, por cima das páginas
         // vizinhas (cujas tabelas e imagens pintam fundo preto).
         canvas.set_clip(editor);
@@ -3073,6 +3208,9 @@ impl Ui {
             pages: page_rects,
             page_grips,
             page_add,
+            draws: draw_hits,
+            draw_btns,
+            draw_panels,
         };
     }
 
@@ -3148,6 +3286,357 @@ impl Ui {
         w
     }
 
+    /// Desenhos visíveis (formas, textos) e, no que está em edição, seleção,
+    /// barra de ferramentas e painel de propriedades. Devolve as áreas
+    /// clicáveis da página atual.
+    #[allow(clippy::type_complexity)]
+    fn paint_draws(&mut self, canvas: &mut Canvas, places: &[(usize, usize, Rect)], editor: Rect) -> (Vec<(Rect, usize, f32)>, Vec<(Rect, DrawBtn)>, Vec<Rect>) {
+        let mut hits = Vec::new();
+        let mut btns = Vec::new();
+        let mut panels = Vec::new();
+        let k = draw_unit(self.font_px());
+        let active = self.active;
+        let cur_page = self.tab().cur;
+        for &(pi, bi, rect) in places {
+            let start = self.tabs[active].pages[pi].draws[bi].start;
+            let editing = self.draw_ed.as_ref().is_some_and(|d| d.tab == active && d.page == pi && d.ed.line == start);
+            let doc = match &self.draw_ed {
+                Some(d) if editing => d.ed.doc.clone(),
+                _ => self.tabs[active].pages[pi].draws[bi].doc.clone(),
+            };
+            let clip = rect.intersect(&editor);
+            canvas.set_clip(clip);
+            let hovered = rect.contains(self.hover.0, self.hover.1);
+            if editing {
+                canvas.rect(rect.x, rect.y, rect.w, rect.h, white(0x08));
+                canvas.stroke_rect(rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2, 1, white(0x30));
+            } else if hovered && pi == cur_page {
+                canvas.stroke_rect(rect.x - 1, rect.y - 1, rect.w + 2, rect.h + 2, 1, white(0x18));
+            }
+            if doc.els.is_empty() && !editing {
+                canvas.stroke_rect(rect.x, rect.y, rect.w, rect.h, 1, white(0x20));
+                self.label(canvas, "Desenho vazio: clique para desenhar", rect.x + rect.w / 2, rect.y + rect.h / 2, UI_FONT, Weight::NORMAL, DIM2, 1, None);
+            }
+            let typing = if editing { self.draw_ed.as_ref().and_then(|d| d.ed.typing) } else { None };
+            let mut texts = Vec::new();
+            draw::render(&doc, canvas, rect.x as f32, rect.y as f32, k, &mut texts, None);
+            let mut caret = None;
+            for t in &texts {
+                let end = self.draw_text(canvas, t);
+                if Some(t.id) == typing {
+                    caret = Some(end);
+                }
+            }
+            if editing {
+                // Texto novo ainda vazio: só o cursor.
+                if let Some(id) = typing {
+                    if let (None, Some(e)) = (caret, doc.get(id)) {
+                        let lh = e.st.font * k * 1.25;
+                        let (x, y) = if e.kind == draw::Kind::Text {
+                            (rect.x as f32 + e.x * k, rect.y as f32 + e.y * k)
+                        } else {
+                            let (x0, y0, x1, y1) = e.bounds();
+                            (rect.x as f32 + (x0 + x1) / 2.0 * k, rect.y as f32 + (y0 + y1) / 2.0 * k - lh / 2.0)
+                        };
+                        caret = Some((x as i32, y as i32, lh as i32));
+                    }
+                    if let Some((x, y, h)) = caret {
+                        canvas.rect(x + 1, y, self.px(2.0).max(1), h, WHITE);
+                    }
+                }
+                self.paint_draw_ui(canvas, rect, editor, k, &doc, &mut btns, &mut panels);
+            }
+            canvas.reset_clip();
+            if pi == cur_page {
+                hits.push((rect, start, k));
+            }
+        }
+        (hits, btns, panels)
+    }
+
+    /// Texto de um desenho. Devolve onde fica o fim (x, topo, altura da linha),
+    /// para o cursor de digitação.
+    fn draw_text(&mut self, canvas: &mut Canvas, t: &draw::TextItem) -> (i32, i32, i32) {
+        let lh = (t.size * 1.25).round();
+        // Moldar é o caro: os textos ficam num cache (redesenhar a nota com um
+        // desenho na tela não molda tudo de novo a cada tecla).
+        let key = cache_key((&t.text, t.size.to_bits(), t.color, t.alpha, t.center));
+        let idx = match self.draw_texts.iter().position(|(k, _, _)| *k == key) {
+            Some(i) => i,
+            None => {
+                let mut b = Buffer::new(&mut self.font_system, Metrics::new(t.size.max(1.0), lh.max(1.0)));
+                b.set_wrap(Wrap::None);
+                b.set_size(None, None);
+                let attrs = Attrs::new().family(Family::SansSerif).color(rgba((t.color >> 16) as u8, (t.color >> 8) as u8, t.color as u8, t.alpha));
+                // Rótulos centralizados linha a linha.
+                b.set_text(&t.text, &attrs, Shaping::Advanced, t.center.then_some(cosmic_text::Align::Center));
+                b.shape_until_scroll(&mut self.font_system, false);
+                let w = Self::text_width(&b);
+                if t.center {
+                    b.set_size(Some(w.ceil() + 1.0), None);
+                    b.shape_until_scroll(&mut self.font_system, false);
+                }
+                if self.draw_texts.len() >= 96 {
+                    self.draw_texts.remove(0);
+                }
+                self.draw_texts.push((key, b, w));
+                self.draw_texts.len() - 1
+            }
+        };
+        let (_, b, w) = &self.draw_texts[idx];
+        let w = *w;
+        let nlines = b.layout_runs().count().max(1) as f32;
+        let (x, y) = if t.center { (t.x - w / 2.0, t.y - nlines * lh / 2.0) } else { (t.x, t.y) };
+        let end = b.layout_runs().last().map(|r| {
+            let rx = if t.center { (w - r.line_w) / 2.0 } else { 0.0 };
+            ((x + rx + r.line_w) as i32, (y + r.line_top) as i32, lh as i32)
+        });
+        let Ui { font_system, swash, draw_texts, .. } = self;
+        let mut r = FastRenderer { canvas, fs: font_system, cache: swash, ox: x.round() as i32, oy: y.round() as i32 };
+        render_buffer(&draw_texts[idx].1, &mut r, WHITE);
+        end.unwrap_or((x as i32, y as i32, lh as i32))
+    }
+
+    /// Seleção, barra de ferramentas e painel de propriedades do desenho em edição.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_draw_ui(&mut self, canvas: &mut Canvas, rect: Rect, editor: Rect, k: f32, doc: &draw::Doc, btns: &mut Vec<(Rect, DrawBtn)>, panels: &mut Vec<Rect>) {
+        let Some(de) = self.draw_ed.as_ref() else { return };
+        let (sel, tool, lock, marquee, style, kinds, typing) = (de.ed.sel.clone(), de.ed.tool, de.ed.lock, de.ed.marquee(), de.ed.shown_style(), de.ed.shown_kinds(), de.ed.typing);
+        let accent = rgba((DRAW_ACCENT >> 16) as u8, (DRAW_ACCENT >> 8) as u8, DRAW_ACCENT as u8, 255);
+        let to = |p: (f32, f32)| (rect.x + (p.0 * k).round() as i32, rect.y + (p.1 * k).round() as i32);
+        // Seleção: caixa de cada elemento; alças no único selecionado.
+        for id in &sel {
+            let Some(e) = doc.get(*id) else { continue };
+            let (x0, y0, x1, y1) = e.bounds();
+            let m = 4.0;
+            let (a, b) = (to((x0 - m, y0 - m)), to((x1 + m, y1 + m)));
+            canvas.stroke_rect(a.0, a.1, (b.0 - a.0).max(2), (b.1 - a.1).max(2), 1, accent);
+        }
+        if let [id] = sel[..] {
+            if let Some(e) = doc.get(id) {
+                let hs = self.px(8.0);
+                for (_, q) in draw::handles(e) {
+                    let c = to(q);
+                    canvas.rounded_rect(c.0 - hs / 2, c.1 - hs / 2, hs, hs, if e.kind.is_path() { hs / 2 } else { 2 }, accent);
+                    canvas.rounded_rect(c.0 - hs / 2 + 1, c.1 - hs / 2 + 1, hs - 2, hs - 2, if e.kind.is_path() { hs / 2 } else { 2 }, BLACK);
+                }
+            }
+        }
+        if let Some((a, b)) = marquee {
+            let (a, b) = (to(a), to(b));
+            let r = Rect::new(a.0.min(b.0), a.1.min(b.1), (a.0 - b.0).abs(), (a.1 - b.1).abs());
+            canvas.rect(r.x, r.y, r.w, r.h, rgba(0x8f, 0x8c, 0xf0, 0x22));
+            canvas.stroke_rect(r.x, r.y, r.w.max(2), r.h.max(2), 1, accent);
+        }
+        // Alça da altura (borda de baixo).
+        let gw = self.px(36.0);
+        canvas.rounded_rect(rect.x + rect.w / 2 - gw / 2, rect.bottom() - self.px(3.0), gw, self.px(4.0), self.px(2.0), white(0x50));
+
+        canvas.set_clip(editor);
+        // ---- barra de ferramentas (no alto do desenho, centralizada) ----
+        let b = self.px(30.0);
+        let gap = self.px(2.0);
+        let pad = self.px(4.0);
+        let done_w = self.text_w_cached("Concluir", UI_FONT_SM) + self.px(SP4);
+        let n = draw::Tool::BAR.len() as i32 + 2;
+        let bar_w = n * (b + gap) + done_w + 2 * pad + self.px(SP2);
+        let bar = Rect::new((rect.x + (rect.w - bar_w) / 2).max(editor.x), rect.y + self.px(SP2), bar_w, b + 2 * pad);
+        canvas.rounded_outline(bar.x, bar.y, bar.w, bar.h, self.px(RADIUS), BORDER, BLACK);
+        panels.push(bar);
+        let mut x = bar.x + pad;
+        for (t, name, letter, digit) in draw::Tool::BAR {
+            let r = Rect::new(x, bar.y + pad, b, b);
+            let on = t == tool;
+            let hot = r.contains(self.hover.0, self.hover.1);
+            if on {
+                canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), rgba(0x8f, 0x8c, 0xf0, 0x55));
+            } else if hot {
+                canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), HOVER);
+            }
+            draw::icon(canvas, t, r, if on { 0xffffff } else { 0xcfcfcf });
+            if hot {
+                let tip = format!("{name} · {} ou {}", letter.to_ascii_uppercase(), digit);
+                let tw = self.text_w_cached(&tip, UI_FONT_XS) + self.px(SP3);
+                let tr = Rect::new(r.x + r.w / 2 - tw / 2, bar.bottom() + self.px(4.0), tw, self.px(20.0));
+                canvas.rounded_outline(tr.x, tr.y, tr.w, tr.h, self.px(RADIUS_SM), BORDER, BLACK);
+                self.label(canvas, &tip, tr.x + tr.w / 2, tr.y + tr.h / 2, UI_FONT_XS, Weight::NORMAL, WHITE, 1, None);
+            }
+            btns.push((r, DrawBtn::Tool(t)));
+            x += b + gap;
+        }
+        // Cadeado (Q): ferramenta continua ativa.
+        let r = Rect::new(x, bar.y + pad, b, b);
+        if lock {
+            canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), rgba(0x8f, 0x8c, 0xf0, 0x55));
+        } else if r.contains(self.hover.0, self.hover.1) {
+            canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), HOVER);
+        }
+        draw::icon(canvas, draw::Tool::Lock, r, if lock { 0xffffff } else { 0xcfcfcf });
+        btns.push((r, DrawBtn::Lock));
+        x += b + gap;
+        // Lixeira: apaga o desenho inteiro.
+        let r = Rect::new(x, bar.y + pad, b, b);
+        if r.contains(self.hover.0, self.hover.1) {
+            canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), HOVER);
+        }
+        self.icon_button(canvas, r, 2);
+        btns.push((r, DrawBtn::DeleteBlock));
+        x += b + gap + self.px(SP2);
+        let r = Rect::new(x, bar.y + pad, done_w, b);
+        canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), if r.contains(self.hover.0, self.hover.1) { white(0x30) } else { white(0x1c) });
+        self.label(canvas, "Concluir", r.x + r.w / 2, r.y + r.h / 2, UI_FONT_SM, Weight::SEMIBOLD, WHITE, 1, None);
+        btns.push((r, DrawBtn::Done));
+
+        // ---- painel de propriedades (à esquerda, abaixo da barra) ----
+        // Só com algo selecionado (a forma recém-desenhada fica selecionada):
+        // com uma ferramenta ativa o desenho fica livre para desenhar.
+        let show = !sel.is_empty() || typing.is_some();
+        if !show {
+            return;
+        }
+        let any = |f: &dyn Fn(draw::Kind) -> bool| kinds.iter().any(|k| f(*k));
+        let has_box = any(&|k| k.is_box());
+        let has_path = any(&|k| matches!(k, draw::Kind::Line | draw::Kind::Arrow));
+        let has_stroke = any(&|k| k != draw::Kind::Text);
+        let has_text = any(&|k| k == draw::Kind::Text) || sel.iter().any(|id| doc.get(*id).is_some_and(|e| !e.text.is_empty())) || typing.is_some();
+        let sw = self.px(20.0);
+        let sg = self.px(3.0);
+        let cols = 9;
+        // Nome da propriedade à esquerda, botões à direita (painel baixo).
+        let lab_w = self.px(74.0);
+        let pw = lab_w + cols * (sw + sg) - sg + 2 * self.px(SP3);
+        // Do lado oposto ao da seleção, para não cobri-la.
+        let sel_cx = sel.iter().filter_map(|id| doc.get(*id)).map(|e| { let (x0, _, x1, _) = e.bounds(); (x0 + x1) / 2.0 }).fold(f32::MAX, f32::min);
+        let left_half = sel_cx != f32::MAX && rect.x as f32 + sel_cx * k < (rect.x + rect.w / 2) as f32;
+        let px0 = if left_half { rect.right() - pw - self.px(SP2) } else { rect.x + self.px(SP2) }.max(editor.x);
+        let mut y = bar.bottom() + self.px(SP2);
+        let py0 = y;
+        // Altura primeiro (fundo do painel), conteúdo depois.
+        let mut rows: Vec<(&str, Vec<DrawBtn>)> = Vec::new();
+        rows.push(("Traço", draw::COLORS.iter().map(|c| DrawBtn::Stroke(*c)).collect()));
+        if has_box {
+            let mut v = vec![DrawBtn::Bg(None)];
+            v.extend(draw::COLORS.iter().map(|c| DrawBtn::Bg(Some(*c))));
+            rows.push(("Fundo", v));
+            if style.bg.is_some() {
+                rows.push(("Padrão", vec![DrawBtn::Fill(draw::Fill::Hachure), DrawBtn::Fill(draw::Fill::Cross), DrawBtn::Fill(draw::Fill::Solid)]));
+            }
+        }
+        if has_stroke {
+            rows.push(("Espessura", draw::WIDTHS.iter().map(|w| DrawBtn::Width(*w)).collect()));
+            rows.push(("Traçado", vec![DrawBtn::Dash(draw::Dash::Solid), DrawBtn::Dash(draw::Dash::Dashed), DrawBtn::Dash(draw::Dash::Dotted)]));
+        }
+        if has_box || has_path {
+            rows.push((if has_path && !has_box { "Linha" } else { "Cantos" }, vec![DrawBtn::Round(false), DrawBtn::Round(true)]));
+        }
+        if has_path {
+            rows.push(("Início", draw::Head::ALL.iter().map(|h| DrawBtn::Start(*h)).collect()));
+            rows.push(("Fim", draw::Head::ALL.iter().map(|h| DrawBtn::End(*h)).collect()));
+        }
+        if has_text {
+            rows.push(("Texto", draw::FONTS.iter().map(|f| DrawBtn::Font(*f)).collect()));
+        }
+        rows.push(("Opacidade", draw::OPACITIES.iter().map(|o| DrawBtn::Opacity(*o)).collect()));
+        if !sel.is_empty() {
+            rows.push(("Ações", vec![DrawBtn::Dup, DrawBtn::Front, DrawBtn::Back, DrawBtn::Del]));
+        }
+        let row_h = sw + self.px(6.0);
+        let ph = rows.len() as i32 * row_h + self.px(SP3);
+        let panel = Rect::new(px0, py0, pw, ph);
+        canvas.rounded_outline(panel.x, panel.y, panel.w, panel.h, self.px(RADIUS), BORDER, BLACK);
+        panels.push(panel);
+        y += self.px(SP2);
+        for (title, items) in rows {
+            self.label(canvas, title, panel.x + self.px(SP3), y + sw / 2, UI_FONT_XS, Weight::NORMAL, DIM, 0, Some(lab_w as f32));
+            let mut bx = panel.x + self.px(SP3) + lab_w;
+            let by = y;
+            for it in items {
+                // Botões de texto (tamanho, opacidade, ações) são mais largos.
+                let text = match it {
+                    DrawBtn::Font(f) => Some(match f as i32 { 16 => "P", 20 => "M", 28 => "G", _ => "GG" }.to_string()),
+                    DrawBtn::Opacity(o) => Some(format!("{o}%")),
+                    DrawBtn::Dup => Some("Duplicar".to_string()),
+                    DrawBtn::Front => Some("Frente".to_string()),
+                    DrawBtn::Back => Some("Trás".to_string()),
+                    DrawBtn::Del => Some("Apagar".to_string()),
+                    _ => None,
+                };
+                let bw = match &text {
+                    Some(t) if t.chars().count() > 3 => (pw - lab_w - 2 * self.px(SP3) - 3 * sg) / 4,
+                    Some(_) => sw * 2,
+                    None => match it {
+                        DrawBtn::Width(_) | DrawBtn::Dash(_) | DrawBtn::Round(_) | DrawBtn::Fill(_) => sw * 2,
+                        DrawBtn::Start(_) | DrawBtn::End(_) => (sw * 3) / 2,
+                        _ => sw,
+                    },
+                };
+                let r = Rect::new(bx, by, bw, sw);
+                let on = match it {
+                    DrawBtn::Stroke(c) => style.stroke == c,
+                    DrawBtn::Bg(c) => style.bg == c,
+                    DrawBtn::Fill(f) => style.fill == f,
+                    DrawBtn::Width(w) => style.width == w,
+                    DrawBtn::Dash(d) => style.dash == d,
+                    DrawBtn::Round(v) => style.round == v,
+                    DrawBtn::Start(h) => style.start == h,
+                    DrawBtn::End(h) => style.end == h,
+                    DrawBtn::Font(f) => style.font == f,
+                    DrawBtn::Opacity(o) => style.opacity == o,
+                    _ => false,
+                };
+                let hot = r.contains(self.hover.0, self.hover.1);
+                canvas.rounded_rect(r.x, r.y, r.w, r.h, self.px(RADIUS_SM), if on { rgba(0x8f, 0x8c, 0xf0, 0x55) } else if hot { white(0x22) } else { white(0x0e) });
+                let inner = Rect::new(r.x + 3, r.y + 3, r.w - 6, r.h - 6);
+                match it {
+                    DrawBtn::Stroke(c) => canvas.rounded_rect(inner.x, inner.y, inner.w, inner.h, 3, rgba((c >> 16) as u8, (c >> 8) as u8, c as u8, 255)),
+                    DrawBtn::Bg(Some(c)) => canvas.rounded_rect(inner.x, inner.y, inner.w, inner.h, 3, rgba((c >> 16) as u8, (c >> 8) as u8, c as u8, 0x90)),
+                    DrawBtn::Bg(None) => {
+                        canvas.stroke_rect(inner.x, inner.y, inner.w, inner.h, 1, white(0x60));
+                        canvas.line(inner.x + 2, inner.bottom() - 3, inner.right() - 3, inner.y + 2, 1, white(0x90));
+                    }
+                    DrawBtn::Fill(f) => {
+                        let st = draw::Style { bg: Some(0xcfcfcf), fill: f, width: 1.0, ..style };
+                        draw::sample(canvas, r, 0xcfcfcf, &st, draw::Kind::Rect);
+                    }
+                    DrawBtn::Width(w) => draw::sample(canvas, r, 0xe0e0e0, &draw::Style { width: w, dash: draw::Dash::Solid, opacity: 100, start: draw::Head::None, end: draw::Head::None, ..style }, draw::Kind::Line),
+                    DrawBtn::Dash(d) => draw::sample(canvas, r, 0xe0e0e0, &draw::Style { dash: d, width: 2.0, opacity: 100, start: draw::Head::None, end: draw::Head::None, ..style }, draw::Kind::Line),
+                    DrawBtn::Round(v) => {
+                        let st = draw::Style { round: v, bg: None, width: 1.5, dash: draw::Dash::Solid, opacity: 100, ..style };
+                        if has_box {
+                            draw::sample(canvas, r, 0xe0e0e0, &st, draw::Kind::Rect);
+                        } else {
+                            // Linha reta ou curva: amostra com três pontos.
+                            let (x0, y0, w0, h0) = (r.x + 5, r.y + 4, r.w - 10, r.h - 8);
+                            if v {
+                                for i in 0..w0 {
+                                    let t = i as f32 / w0 as f32;
+                                    let yy = y0 as f32 + h0 as f32 * (0.5 - 0.5 * (t * std::f32::consts::PI).sin());
+                                    canvas.rect(x0 + i, yy as i32 + h0 / 2, 2, 2, white(0xe0));
+                                }
+                            } else {
+                                canvas.line(x0, y0 + h0, x0 + w0 / 2, y0, 2, white(0xe0));
+                                canvas.line(x0 + w0 / 2, y0, x0 + w0, y0 + h0, 2, white(0xe0));
+                            }
+                        }
+                    }
+                    DrawBtn::Start(h) | DrawBtn::End(h) => {
+                        let start = matches!(it, DrawBtn::Start(_));
+                        let st = draw::Style { start: if start { h } else { draw::Head::None }, end: if start { draw::Head::None } else { h }, width: 1.5, dash: draw::Dash::Solid, opacity: 100, round: false, ..style };
+                        draw::sample(canvas, r, 0xe0e0e0, &st, draw::Kind::Arrow);
+                    }
+                    _ => {
+                        if let Some(t) = &text {
+                            self.label(canvas, t, r.x + r.w / 2, r.y + r.h / 2, UI_FONT_XS, Weight::NORMAL, WHITE, 1, None);
+                        }
+                    }
+                }
+                btns.push((r, it));
+                bx += bw + sg;
+            }
+            y += row_h;
+        }
+    }
+
     /// Solta o que não está na tela: imagens de outras abas (refeitas do
     /// disco se voltarem), o layout de texto das abas escondidas e, com
     /// `glyphs`, as imagens de glifos rasterizados (emoji colorido ocupa
@@ -3169,6 +3658,7 @@ impl Ui {
                 });
             }
         }
+        self.draw_texts.clear();
         if glyphs {
             self.swash = SwashCache::new();
             release_font_pages();
@@ -3716,7 +4206,7 @@ fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32,
             let Some(info) = lines.get(run.line_i).copied() else { continue };
             let abs_line = map.get(run.line_i).copied().unwrap_or(run.line_i);
             let in_main = map.is_empty();
-            if info.folded || (in_main && (info.col.is_some() || rows.contains(&abs_line) || matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd))) {
+            if info.folded || info.draw.is_some() || (in_main && (info.col.is_some() || rows.contains(&abs_line) || matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd))) {
                 continue;
             }
             let dy = shift.get(abs_line).copied().unwrap_or(0);
@@ -3875,6 +4365,8 @@ struct App {
     img_drag: Option<ImgDrag>,
     img_move: Option<ImgMove>,
     last_click: (Instant, (f64, f64), u32),
+    /// Cliques no desenho (para o duplo clique).
+    draw_clicks: (Instant, (i32, i32), u32),
     compose: Option<xkb::compose::State>,
     blink_token: Option<RegistrationToken>,
     blink_until: Instant,
@@ -3980,6 +4472,8 @@ fn main() {
         prof: Prof::new(),
         labels: Vec::new(),
         mem_tab: usize::MAX,
+        draw_ed: None,
+        draw_texts: Vec::new(),
         glyphs: None,
         images: ImageCache::new(store.base_dir.clone()),
         store,
@@ -4056,6 +4550,7 @@ fn main() {
         img_drag: None,
         img_move: None,
         last_click: (Instant::now() - Duration::from_secs(10), (0.0, 0.0), 0),
+        draw_clicks: (Instant::now() - Duration::from_secs(10), (0, 0), 0),
         compose,
         blink_token: None,
         blink_until: Instant::now(),
@@ -4249,6 +4744,7 @@ impl App {
         self.ui.font_system = make_font_system(db);
         self.ui.swash = SwashCache::new();
         self.ui.labels.clear();
+        self.ui.draw_texts.clear();
         self.ui.fonts_full = true;
         self.ui.fonts_loading = false;
         // Os buffers já moldados (inclusive os guardados em cache de tabelas,
@@ -4295,6 +4791,9 @@ impl App {
     }
 
     fn draw(&mut self) {
+        if self.ui.draw_ed.as_ref().is_some_and(|d| d.tab != self.ui.active || d.page != self.ui.tab().cur || self.ui.list_open) {
+            self.draw_exit();
+        }
         let scale = self.ui.scale.max(1);
         let width = (self.ui.width as i32 * scale).max(1);
         let height = (self.ui.height as i32 * scale).max(1);
@@ -4440,6 +4939,363 @@ impl App {
         unsafe {
             libc::malloc_trim(0);
         }
+    }
+
+    // ---------- desenho ----------
+
+    /// `/desenho`: bloco novo abaixo da linha atual, já em edição (retângulo).
+    fn insert_drawing(&mut self) {
+        let tab = self.ui.tab();
+        let cur = tab.editor.cursor();
+        let text = tab.line_text(cur.line);
+        let block = format!("{} {}\n```", draw::FENCE, draw::DEFAULT_H as i32);
+        let start = if text.trim().is_empty() {
+            self.insert_block(&format!("{block}\n"), 2, 0);
+            cur.line
+        } else {
+            let (_, tab) = self.ui.ed();
+            tab.editor.set_cursor(Cursor::new(cur.line, text.len()));
+            self.insert_block(&format!("\n{block}\n"), 3, 0);
+            cur.line + 1
+        };
+        self.draw_enter(start);
+        if let Some(d) = self.ui.draw_ed.as_mut() {
+            d.ed.tool = draw::Tool::Rect;
+        }
+        self.request_redraw();
+    }
+
+    /// Entra na edição do desenho cuja cerca está na linha `start`.
+    fn draw_enter(&mut self, start: usize) {
+        let (ti, pi) = (self.ui.active, self.ui.tab().cur);
+        let Some(doc) = self.ui.tab().draws.iter().find(|d| d.start == start).map(|d| d.doc.clone()) else { return };
+        self.ui.draw_ed = Some(DrawEdit { tab: ti, page: pi, ed: draw::Editor::new(start, doc) });
+        self.ui.slash = None;
+        self.request_redraw();
+    }
+
+    /// Sai da edição (grava o texto em digitação).
+    fn draw_exit(&mut self) {
+        let Some(mut d) = self.ui.draw_ed.take() else { return };
+        let (ti, pi) = (d.tab, d.page);
+        let out = d.ed.finish_typing();
+        if out.commit && ti == self.ui.active && pi == self.ui.tab().cur {
+            self.ui.draw_ed = Some(d);
+            self.draw_commit();
+            self.ui.draw_ed = None;
+        }
+        let fp = self.ui.font_px();
+        let Ui { font_system, images, tabs, .. } = &mut self.ui;
+        if let Some(page) = tabs.get_mut(ti).and_then(|t| t.pages.get_mut(pi)) {
+            if page.draw_live.take().is_some() {
+                page.restyle(font_system, images, fp);
+            }
+        }
+        self.set_cursor_icon(CursorIcon::Default);
+        self.request_redraw();
+    }
+
+    /// Ponto da tela → unidades do desenho em edição.
+    fn draw_units(&self, px: i32, py: i32) -> Option<(f32, f32)> {
+        let d = self.ui.draw_ed.as_ref()?;
+        let &(r, _, k) = self.ui.hits.draws.iter().find(|(_, l, _)| *l == d.ed.line)?;
+        Some(((px - r.x) as f32 / k, (py - r.y) as f32 / k))
+    }
+
+    /// Resultado de um evento do editor: relayout se a altura mudou, gravação.
+    fn draw_out(&mut self, out: draw::Out) {
+        if let Some(d) = self.ui.draw_ed.as_ref() {
+            let (line, h) = (d.ed.line, d.ed.doc.height);
+            let fp = self.ui.font_px();
+            let page_h = self.ui.tab().draws.iter().find(|b| b.start == line).map(|b| b.doc.height);
+            let live = self.ui.tab().draw_live;
+            if page_h != Some(h) && live != Some((line, h)) {
+                let Ui { font_system, images, tabs, active, .. } = &mut self.ui;
+                let tab = &mut tabs[*active];
+                let cur = tab.cur;
+                let page = &mut tab.pages[cur];
+                page.draw_live = Some((line, h));
+                page.restyle(font_system, images, fp);
+            }
+        }
+        if out.commit {
+            self.draw_commit();
+        }
+        if out.redraw || out.commit {
+            self.request_redraw();
+        }
+    }
+
+    /// Grava o desenho em edição na nota: troca o bloco inteiro numa única
+    /// alteração (Ctrl+Z desfaz como qualquer edição).
+    fn draw_commit(&mut self) {
+        let Some(d) = self.ui.draw_ed.as_ref() else { return };
+        let line = d.ed.line;
+        let mut lines = vec![d.ed.doc.fence()];
+        lines.extend(d.ed.doc.body());
+        lines.push("```".to_string());
+        let new = lines.join("\n");
+        let Some(end) = self.ui.tab().draws.iter().find(|b| b.start == line).map(|b| b.end) else { return };
+        let (_, tab) = self.ui.ed();
+        let old_n = end - line + 1;
+        let new_n = lines.len();
+        let end_len = tab.line_text(end).len();
+        let cur = tab.editor.cursor();
+        let had_close = tab.lines.get(end).is_some_and(|l| l.block == Block::Fence);
+        let new = if had_close { new } else { format!("{new}\n") };
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        tab.editor.delete_range(Cursor::new(line, 0), Cursor::new(end, end_len));
+        tab.editor.insert_at(Cursor::new(line, 0), &new, None);
+        let change = tab.editor.finish_change();
+        // O cursor de texto fica onde estava (fora do bloco).
+        let c = if cur.line > end { Cursor::new(cur.line + new_n - old_n.min(cur.line + new_n), cur.index) } else if cur.line >= line { Cursor::new(line + new_n, 0) } else { cur };
+        let n = tab.editor.with_buffer(|b| b.lines.len());
+        tab.editor.set_cursor(Cursor::new(c.line.min(n - 1), 0).max(Cursor::new(c.line.min(n - 1), c.index.min(tab.line_text(c.line.min(n - 1)).len()))));
+        tab.draw_live = None;
+        self.after_change(change, true);
+    }
+
+    /// Clique: no desenho em edição (barra, painel ou tela), num desenho
+    /// (entra na edição) ou fora (sai). Devolve se o clique foi consumido.
+    fn draw_press(&mut self, px: i32, py: i32, button: u32) -> bool {
+        let hit = self.ui.hits.draws.iter().find(|(r, _, _)| r.contains(px, py)).map(|&(_, l, _)| l);
+        if let Some(d) = self.ui.draw_ed.as_ref() {
+            let line = d.ed.line;
+            if let Some(&(_, b)) = self.ui.hits.draw_btns.iter().find(|(r, _)| r.contains(px, py)) {
+                if button == BTN_LEFT {
+                    self.draw_button(b);
+                }
+                return true;
+            }
+            if self.ui.hits.draw_panels.iter().any(|r| r.contains(px, py)) {
+                return true;
+            }
+            if hit != Some(line) {
+                self.draw_exit();
+                if hit.is_none() {
+                    return false;
+                }
+            }
+        }
+        let Some(line) = hit else { return false };
+        if button != BTN_LEFT {
+            return button == BTN_RIGHT;
+        }
+        if self.ui.draw_ed.is_none() {
+            self.draw_enter(line);
+        }
+        let Some(p) = self.draw_units(px, py) else { return true };
+        // Duplo clique (mesmo lugar, 400 ms).
+        let now = Instant::now();
+        let (t, pos, n) = self.draw_clicks;
+        let clicks = if now.duration_since(t) < Duration::from_millis(400) && (pos.0 - px).abs() < 6 && (pos.1 - py).abs() < 6 { n + 1 } else { 1 };
+        self.draw_clicks = (now, (px, py), clicks);
+        let shift = self.modifiers.shift;
+        let out = self.ui.draw_ed.as_mut().map(|d| d.ed.press(p, shift, clicks)).unwrap_or_default();
+        self.draw_out(out);
+        true
+    }
+
+    fn draw_motion(&mut self, px: i32, py: i32) -> bool {
+        let Some(d) = self.ui.draw_ed.as_ref() else { return false };
+        let line = d.ed.line;
+        let over_ui = self.ui.hits.draw_panels.iter().any(|r| r.contains(px, py));
+        let inside = self.ui.hits.draws.iter().any(|(r, l, _)| *l == line && r.contains(px, py));
+        if !d.ed.dragging() && (!inside || over_ui) {
+            if over_ui {
+                self.ui.hover = (px, py);
+                self.set_cursor_icon(CursorIcon::Pointer);
+                self.request_redraw();
+                return true;
+            }
+            return false;
+        }
+        self.ui.hover = (px, py);
+        let Some(p) = self.draw_units(px, py) else { return false };
+        let shift = self.modifiers.shift;
+        let d = self.ui.draw_ed.as_mut().expect("em edição");
+        let out = d.ed.motion(p, shift);
+        let icon = match d.ed.tool {
+            draw::Tool::Select => {
+                let near_bottom = (p.1 - d.ed.doc.height).abs() <= 6.0;
+                if near_bottom {
+                    CursorIcon::NsResize
+                } else if draw::topmost(&d.ed.doc, p).is_some() {
+                    CursorIcon::Move
+                } else {
+                    CursorIcon::Default
+                }
+            }
+            draw::Tool::Text => CursorIcon::Text,
+            draw::Tool::Eraser => CursorIcon::Pointer,
+            _ => CursorIcon::Crosshair,
+        };
+        self.set_cursor_icon(icon);
+        // Durante o arraste só redesenha; grava ao soltar.
+        self.draw_out(draw::Out { redraw: out.redraw, commit: false });
+        if !out.redraw {
+            self.request_redraw();
+        }
+        true
+    }
+
+    fn draw_button(&mut self, b: DrawBtn) {
+        use draw::Style;
+        let Some(d) = self.ui.draw_ed.as_mut() else { return };
+        let ed = &mut d.ed;
+        let out = match b {
+            DrawBtn::Tool(t) => ed.set_tool(t),
+            DrawBtn::Lock => {
+                ed.lock = !ed.lock;
+                draw::Out { redraw: true, commit: false }
+            }
+            DrawBtn::Done => {
+                self.draw_exit();
+                return;
+            }
+            DrawBtn::DeleteBlock => {
+                self.draw_delete_block();
+                return;
+            }
+            DrawBtn::Stroke(c) => ed.apply_style(|s: &mut Style| s.stroke = c),
+            DrawBtn::Bg(c) => ed.apply_style(|s: &mut Style| s.bg = c),
+            DrawBtn::Fill(f) => ed.apply_style(|s: &mut Style| s.fill = f),
+            DrawBtn::Width(w) => ed.apply_style(|s: &mut Style| s.width = w),
+            DrawBtn::Dash(v) => ed.apply_style(|s: &mut Style| s.dash = v),
+            DrawBtn::Round(v) => ed.apply_style(|s: &mut Style| s.round = v),
+            DrawBtn::Start(h) => ed.apply_style(|s: &mut Style| s.start = h),
+            DrawBtn::End(h) => ed.apply_style(|s: &mut Style| s.end = h),
+            DrawBtn::Font(f) => ed.apply_style(|s: &mut Style| s.font = f),
+            DrawBtn::Opacity(o) => ed.apply_style(|s: &mut Style| s.opacity = o),
+            DrawBtn::Front => ed.reorder(true, false),
+            DrawBtn::Back => ed.reorder(false, false),
+            DrawBtn::Dup => ed.duplicate(),
+            DrawBtn::Del => ed.delete_selection(),
+        };
+        self.draw_out(out);
+    }
+
+    /// Apaga o bloco do desenho inteiro (desfazível).
+    fn draw_delete_block(&mut self) {
+        let Some(d) = self.ui.draw_ed.take() else { return };
+        let line = d.ed.line;
+        let Some(end) = self.ui.tab().draws.iter().find(|b| b.start == line).map(|b| b.end) else { return };
+        let n = self.ui.tab().editor.with_buffer(|b| b.lines.len());
+        let (_, tab) = self.ui.ed();
+        tab.draw_live = None;
+        tab.editor.set_selection(Selection::None);
+        tab.editor.start_change();
+        // Leva junto a quebra de linha (a de depois, ou a de antes no fim da nota).
+        let (a, b) = if end + 1 < n { (Cursor::new(line, 0), Cursor::new(end + 1, 0)) } else if line > 0 {
+            let prev = tab.line_text(line - 1).len();
+            (Cursor::new(line - 1, prev), Cursor::new(end, tab.line_text(end).len()))
+        } else {
+            (Cursor::new(line, 0), Cursor::new(end, tab.line_text(end).len()))
+        };
+        tab.editor.delete_range(a, b);
+        tab.editor.set_cursor(a);
+        let change = tab.editor.finish_change();
+        self.after_change(change, true);
+        self.set_cursor_icon(CursorIcon::Default);
+    }
+
+    /// Teclas no desenho em edição. Devolve se a tecla foi usada.
+    fn draw_key(&mut self, ev: &KeyEvent) -> bool {
+        let m = self.modifiers;
+        let sym = ev.keysym;
+        let typing = self.ui.draw_ed.as_ref().is_some_and(|d| d.ed.typing.is_some());
+        let ch = sym.key_char().map(|c| c.to_ascii_lowercase());
+        // Desfazer/refazer: o da nota; o desenho é relido do texto.
+        if m.ctrl && !typing && (ch == Some('z') || ch == Some('y')) {
+            if ch == Some('y') || m.shift { self.redo() } else { self.undo() }
+            self.draw_reload();
+            return true;
+        }
+        let Some(d) = self.ui.draw_ed.as_mut() else { return false };
+        let ed = &mut d.ed;
+        if typing {
+            let out = match sym {
+                Keysym::Escape => ed.finish_typing(),
+                Keysym::Return | Keysym::KP_Enter => ed.type_str("\n"),
+                Keysym::BackSpace => ed.backspace(),
+                _ => match ev.utf8.as_ref().filter(|t| !t.is_empty() && !t.chars().any(char::is_control)) {
+                    Some(t) if !m.ctrl && !m.alt => ed.type_str(&t.clone()),
+                    _ => draw::Out::default(),
+                },
+            };
+            self.draw_out(out);
+            return true;
+        }
+        let step = if m.shift { 10.0 } else { 1.0 };
+        let out = match (sym, ch) {
+            (Keysym::Escape, _) => {
+                let (handled, out) = ed.escape();
+                if !handled {
+                    self.draw_exit();
+                    return true;
+                }
+                out
+            }
+            (Keysym::Delete | Keysym::BackSpace, _) => ed.delete_selection(),
+            (Keysym::Left, _) => ed.nudge(-step, 0.0),
+            (Keysym::Right, _) => ed.nudge(step, 0.0),
+            (Keysym::Up, _) => ed.nudge(0.0, -step),
+            (Keysym::Down, _) => ed.nudge(0.0, step),
+            (Keysym::Return | Keysym::KP_Enter, _) if !m.ctrl => {
+                // Enter numa forma/seta selecionada: edita o rótulo.
+                match ed.sel[..] {
+                    [id] if ed.doc.get(id).is_some_and(|e| e.kind != draw::Kind::Free) => {
+                        ed.typing = Some(id);
+                        draw::Out { redraw: true, commit: false }
+                    }
+                    _ => draw::Out::default(),
+                }
+            }
+            (_, Some('d')) if m.ctrl => ed.duplicate(),
+            (_, Some('a')) if m.ctrl => ed.select_all(),
+            (_, Some(']')) if m.ctrl => ed.reorder(true, m.shift),
+            (_, Some('[')) if m.ctrl => ed.reorder(false, m.shift),
+            (_, Some('}')) if m.ctrl => ed.reorder(true, true),
+            (_, Some('{')) if m.ctrl => ed.reorder(false, true),
+            (_, Some('q')) if !m.ctrl && !m.alt => {
+                ed.lock = !ed.lock;
+                draw::Out { redraw: true, commit: false }
+            }
+            (_, Some(c)) if !m.ctrl && !m.alt => match draw::Tool::BAR.iter().find(|(_, _, l, n)| *l == c || *n == c) {
+                Some(&(t, ..)) => ed.set_tool(t),
+                // Outras letras não vão para o texto da nota.
+                None => draw::Out::default(),
+            },
+            _ => return false,
+        };
+        self.draw_out(out);
+        true
+    }
+
+    /// Relê o desenho em edição do texto (depois de desfazer/refazer).
+    fn draw_reload(&mut self) {
+        let Some(line) = self.ui.draw_ed.as_ref().map(|d| d.ed.line) else { return };
+        // O cursor da nota não fica nas linhas escondidas do bloco.
+        if let Some(end) = self.ui.tab().draws.iter().find(|b| b.start == line).map(|b| b.end) {
+            let c = self.ui.tab().editor.cursor();
+            if c.line >= line && c.line <= end {
+                let n = self.ui.tab().editor.with_buffer(|b| b.lines.len());
+                let (_, tab) = self.ui.ed();
+                tab.editor.set_cursor(Cursor::new((end + 1).min(n - 1), 0));
+            }
+        }
+        match self.ui.tab().draws.iter().find(|b| b.start == line).map(|b| b.doc.clone()) {
+            Some(doc) => {
+                if let Some(d) = self.ui.draw_ed.as_mut() {
+                    d.ed.sel.retain(|id| doc.get(*id).is_some());
+                    d.ed.typing = None;
+                    d.ed.doc = doc;
+                }
+            }
+            None => self.ui.draw_ed = None,
+        }
+        self.request_redraw();
     }
 
     // ---------- timers ----------
@@ -4614,6 +5470,7 @@ impl App {
             page.editor.set_cursor(cur);
         }
         if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
+            page.touch_lines(&ch);
             page.undo.record(ch, true);
         }
         page.counts = None;
@@ -4634,6 +5491,7 @@ impl App {
         let change = page.editor.finish_change();
         page.editor.set_cursor(if cur.line >= line { Cursor::new(cur.line + 1, cur.index) } else { cur });
         if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
+            page.touch_lines(&ch);
             page.undo.record(ch, true);
         }
         page.counts = None;
@@ -4865,6 +5723,7 @@ impl App {
         let mut changed = false;
         if let Some(ch) = change {
             if !ch.items.is_empty() {
+                self.ui.tab_mut().touch_lines(&ch);
                 self.ui.tab_mut().undo.record(ch, boundary);
                 changed = true;
             }
@@ -4915,6 +5774,11 @@ impl App {
 
     fn insert_text(&mut self, text: &str) {
         if text.is_empty() {
+            return;
+        }
+        if let Some(d) = self.ui.draw_ed.as_mut().filter(|d| d.ed.typing.is_some()) {
+            let out = d.ed.type_str(text);
+            self.draw_out(out);
             return;
         }
         self.ensure_fonts(text);
@@ -5183,6 +6047,7 @@ impl App {
             let tab = self.ui.tab_mut();
             tab.editor.set_selection(Selection::None);
             tab.editor.apply_change(&change);
+            tab.touch_lines(&change);
         }
         self.ui.restyle_active();
         let tab = self.ui.tab_mut();
@@ -5598,6 +6463,7 @@ impl App {
             "hr" => self.insert_block("---\n", 1, 0),
             "hrfull" => self.insert_block("___\n", 1, 0),
             "page" => self.new_page(false),
+            "draw" => self.insert_drawing(),
             "table" => self.insert_table(),
             "col2" | "col3" | "col4" => {
                 let n = key.as_bytes()[3] - b'0';
@@ -6209,6 +7075,7 @@ impl App {
             "emoji" => self.open_glyphs(GlyphKind::Emoji),
             "hrfull" => self.toggle_full_rule(),
             "page" => self.new_page(false),
+            "draw" => self.insert_drawing(),
             _ => {}
         }
         self.after_input();
@@ -6837,6 +7704,9 @@ impl App {
             self.on_key_list(ev);
             return;
         }
+        if self.ui.draw_ed.is_some() && self.draw_key(ev) {
+            return;
+        }
 
         let ch = sym.key_char().map(|c| c.to_ascii_lowercase());
         // Dígito físico (independe de layout/Shift): evdev KEY_1..KEY_9 = 2..10, KEY_0 = 11.
@@ -7221,6 +8091,9 @@ impl App {
             self.set_cursor_icon(CursorIcon::Default);
             return;
         }
+        if self.draw_motion(px, py) {
+            return;
+        }
         if self.img_drag.is_some() {
             self.ui.hover = (px, py);
             self.image_drag_motion(px, py);
@@ -7384,6 +8257,9 @@ impl App {
                 self.ui.ctx = None;
                 self.request_redraw();
             }
+            return;
+        }
+        if self.draw_press(px, py, button) {
             return;
         }
         if let Some(pk) = &self.ui.picker {
@@ -7641,6 +8517,13 @@ impl App {
     }
 
     fn on_pointer_release(&mut self, button: u32) {
+        if button == BTN_LEFT && self.ui.draw_ed.as_ref().is_some_and(|d| d.ed.dragging()) {
+            let (px, py) = self.phys();
+            let p = self.draw_units(px, py).unwrap_or_default();
+            let out = self.ui.draw_ed.as_mut().map(|d| d.ed.release(p)).unwrap_or_default();
+            self.draw_out(out);
+            return;
+        }
         if button == BTN_LEFT && self.ui.page_drag.take().is_some() {
             self.ui.persist_state();
             self.request_redraw();

@@ -124,7 +124,7 @@ Numa linha vazia (ou só com espaços) digite `/`: abre o menu de blocos. Contin
 digitando para filtrar (`/tab`, `/col`, `/img`), `↑↓` escolhe, `Enter` aplica,
 `Esc` fecha. Itens: Título 1–3, Texto normal, Lista, Lista numerada, Checkbox,
 Timer, Evento, Toggle, Citação, Divisor, Divisor da tela inteira, Página ao
-lado, Tabela, 2/3/4 colunas, Imagem, Bloco de código.
+lado, Desenho, Tabela, 2/3/4 colunas, Imagem, Bloco de código.
 
 ### Toggles (conteúdo recolhível)
 
@@ -331,6 +331,61 @@ itálico, tachado, código, link, cor, remover cor, MAIÚSCULAS, minúsculas e
 Primeira Maiúscula; sempre aparecem colar, selecionar tudo, títulos, listas,
 tarefa, citação, duplicar/apagar linha, emoji, divisor da tela inteira e
 página ao lado. Clicar fora da seleção move o cursor antes de abrir o menu.
+
+### Desenho (estilo Excalidraw)
+
+`/desenho` (ou "Desenho" no menu do botão direito) cria um quadro de desenho
+vetorial no meio da nota. Clique nele para editar: aparece a barra de
+ferramentas no alto e, com algo selecionado, o painel de propriedades. Clique
+fora, `Esc` sem nada selecionado ou **Concluir** saem.
+
+| Ferramenta | Atalho | |
+|---|---|---|
+| Seleção | `V` ou `1` | clique seleciona, `Shift` soma; arrastar no vazio faz caixa de seleção; arrastar move; alças redimensionam (`Shift` mantém a proporção) |
+| Retângulo | `R` ou `2` | `Shift` faz quadrado |
+| Losango | `D` ou `3` | |
+| Elipse | `O` ou `4` | `Shift` faz círculo |
+| Seta | `A` ou `5` | `Shift` trava em 45°; a ponta gruda numa forma e acompanha quando ela se move |
+| Linha | `L` ou `6` | |
+| Lápis | `P` ou `7` | traço livre |
+| Texto | `T` ou `8` | clique e digite; `Esc` termina |
+| Triângulo | `G` ou `9` | |
+| Borracha | `E` ou `0` | clique ou arraste sobre os elementos |
+
+- **Rótulo:** duplo clique numa forma ou seta (ou `Enter` com ela
+  selecionada) escreve o texto dentro dela, centralizado; duplo clique no
+  vazio cria um texto solto.
+- **Propriedades** (da seleção, e dos próximos elementos): cor do traço (8),
+  fundo (nenhum + 8), padrão do fundo (hachura, cruzado, sólido), espessura
+  (fina, média, grossa), traçado (contínuo, tracejado, pontilhado), cantos
+  retos/arredondados (nas setas e linhas: reta ou curva pelos pontos), pontas
+  de início e fim (nada, seta, triângulo, barra, ponto), tamanho do texto
+  (P, M, G, GG) e opacidade.
+- **Ações:** `Ctrl+D` duplica, `Delete` apaga, `Ctrl+A` seleciona tudo,
+  setas movem 1 unidade (`Shift`: 10), `Ctrl+]`/`Ctrl+[` uma camada para
+  frente/trás (com `Shift`, até o topo/fundo), `Q` trava a ferramenta (ela
+  continua ativa depois de desenhar). Linhas e setas: arraste um ponto pela
+  alça para mudá-lo.
+- **Tamanho:** o quadro cresce sozinho para caber o que você desenha; a borda
+  de baixo também arrasta a altura. A largura é a da página.
+- **Desfazer:** cada ação é uma alteração da nota: `Ctrl+Z`/`Ctrl+Shift+Z`
+  funcionam dentro e fora do desenho.
+- A lixeira da barra apaga o desenho inteiro (desfazível).
+
+No arquivo, o desenho é um bloco de código legível, um elemento por linha;
+outros leitores de Markdown mostram o bloco como código:
+
+````markdown
+```desenho 320
+ret 1 40 30 160 80 c=4dabf7 f=1f3b57 p=sol "Início"
+eli 2 300 30 120 80
+seta 3 200,70 300,70 de=1 para=2
+```
+````
+
+Ainda não há: rotação, grupos, alinhar/distribuir, imagens dentro do
+desenho, traço "feito à mão", zoom e rolagem dentro do quadro, exportar
+PNG/SVG e colaboração.
 
 ### Agenda: timers, pausas e eventos
 
