@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.7.1" date="2026-11-02">
+      <description>
+        <p>Fundo transparente agora funciona também ao trocar o fundo com a nota já aberta (antes ficava preto).</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-11-02">
       <description>
         <p>Fundo por nota: qualquer cor hex, translúcido ou totalmente transparente (Ctrl+Shift+B), com tinta escura automática em fundos claros.</p>
