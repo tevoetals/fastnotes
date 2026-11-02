@@ -667,7 +667,28 @@ impl Bot {
 fn reminders(token: &str) {
     let api = Api::new(token);
     let Ok(store) = Store::open() else { return };
+    // Por nota: data de modificação, título e só as linhas com `📅`/`⏱`.
+    // A cada volta só as notas alteradas são lidas de novo.
+    let mut notes: std::collections::HashMap<PathBuf, (std::time::SystemTime, String, Vec<String>)> = std::collections::HashMap::new();
     loop {
+        let mut seen = std::collections::HashSet::new();
+        if let Ok(rd) = std::fs::read_dir(&store.notes_dir) {
+            for e in rd.flatten() {
+                let path = e.path();
+                if path.extension().is_none_or(|x| x != "md") {
+                    continue;
+                }
+                let Ok(mtime) = e.metadata().and_then(|m| m.modified()) else { continue };
+                seen.insert(path.clone());
+                if notes.get(&path).is_some_and(|(t, _, _)| *t == mtime) {
+                    continue;
+                }
+                let text = store.read(&path).unwrap_or_default();
+                let lines = text.lines().filter(|l| l.contains(agenda::EVENT) || l.contains(agenda::TIMER)).map(str::to_string).collect();
+                notes.insert(path, (mtime, store::display_title(&text), lines));
+            }
+        }
+        notes.retain(|p, _| seen.contains(p));
         let now = agenda::now();
         // O pareamento pode acontecer depois que o serviço subiu.
         let chat = load_config().and_then(|c| c.chat);
@@ -685,12 +706,8 @@ fn reminders(token: &str) {
                 }
             }
         };
-        for n in store.list() {
-            let text = store.read(&n.path).unwrap_or_default();
-            if !text.contains(agenda::EVENT) && !text.contains(agenda::TIMER) {
-                continue;
-            }
-            for line in text.lines() {
+        for (note_title, lines) in notes.values().map(|(_, t, l)| (t, l)) {
+            for line in lines {
                 if agenda::is_done(line) {
                     continue;
                 }
@@ -702,12 +719,12 @@ fn reminders(token: &str) {
                             continue;
                         }
                         let head = if kind == "antes" { "📅 Daqui a 10 minutos" } else { "📅 Agora" };
-                        send(&format!("{kind}:{}:{title}", e.when), head, &format!("{title} · {when}"), &n.title);
+                        send(&format!("{kind}:{}:{title}", e.when), head, &format!("{title} · {when}"), note_title);
                     }
                 }
                 if let Some(end) = agenda::parse_timer(line).and_then(|t| agenda::deadline(&t, now)) {
                     if now >= end && now - end < agenda::GRACE_SECS {
-                        send(&format!("timer:{end}:{title}"), "⏱ Tempo esgotado", &title, &n.title);
+                        send(&format!("timer:{end}:{title}"), "⏱ Tempo esgotado", &title, note_title);
                     }
                 }
             }

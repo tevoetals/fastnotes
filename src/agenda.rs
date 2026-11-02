@@ -351,7 +351,8 @@ pub fn title_of_line(line: &str) -> String {
     t.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Tarefa marcada (`- [x]`): não avisa mais.
+/// Tarefa marcada (`- [x]`): não avisa mais. (O app usa `Block::Task(true)`.)
+#[allow(dead_code)]
 pub fn is_done(line: &str) -> bool {
     let t = line.trim_start().trim_start_matches(['>', ' ']);
     t.starts_with("- [x]") || t.starts_with("- [X]") || t.starts_with("* [x]") || t.starts_with("* [X]")
@@ -376,20 +377,34 @@ fn claims_dir() -> PathBuf {
 /// Marca o aviso `key` como dado. `false` se outro processo (app ou bot) já
 /// o deu. Marcas com mais de 3 dias são apagadas.
 pub fn claim(key: &str) -> bool {
-    let dir = claims_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
-        for e in rd.flatten() {
-            if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < old) {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    // Avisos já resolvidos por este processo: o relógio pergunta de novo a
+    // cada tique durante a meia hora de tolerância, sem tocar no disco.
+    static DONE: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+    static CLEANED: AtomicI64 = AtomicI64::new(0);
     let mut h: u64 = 0xcbf29ce484222325;
     for b in key.bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
+    }
+    let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+    if !done.get_or_insert_with(HashSet::new).insert(h) {
+        return false;
+    }
+    let dir = claims_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    // Faxina das marcas antigas: no máximo uma vez por hora.
+    if now() - CLEANED.swap(now(), Ordering::Relaxed) > 3600 {
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            let old = SystemTime::now() - Duration::from_secs(3 * 86_400);
+            for e in rd.flatten() {
+                if e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t < old) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
     }
     match std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(format!("{h:016x}"))) {
         Ok(_) => true,

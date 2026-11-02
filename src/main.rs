@@ -398,9 +398,10 @@ impl Prof {
     fn frame_done(&mut self) {
         self.frames += 1;
         if self.frames % 30 == 0 {
-            let n = self.frames as f64;
-            let parts: Vec<String> = PROF_NAMES.iter().zip(self.t.iter()).map(|(k, v)| format!("{k} {:.2}", v / n)).collect();
-            eprintln!("[perfil] média por quadro (ms) após {} quadros: {}", self.frames, parts.join(" | "));
+            // Média dos últimos 30 quadros (não acumulada: mostra o regime).
+            let parts: Vec<String> = PROF_NAMES.iter().zip(self.t.iter()).map(|(k, v)| format!("{k} {:.2}", v / 30.0)).collect();
+            eprintln!("[perfil] média por quadro (ms), quadros {}–{}: {}", self.frames - 29, self.frames, parts.join(" | "));
+            self.t = [0.0; PROF_NAMES.len()];
         }
     }
 }
@@ -995,6 +996,14 @@ impl std::ops::DerefMut for Tab {
 struct Page {
     editor: Editor<'static>,
     undo: Undo,
+    /// (palavras, caracteres) desta página; `None` depois de uma edição.
+    counts: Option<(usize, usize)>,
+    /// Hashes de blocos de tabela já alinhados (não reformata a cada tecla).
+    tables_fmt: HashSet<u64>,
+    /// Chave do estilo aplicado a cada linha do buffer (ver `apply_attrs`).
+    attr_keys: Vec<u64>,
+    /// Chave do que define o layout das tabelas da última vez (`build_tables`).
+    tables_key: u64,
     editor_size: (f32, f32),
     /// Largura disponível para tabelas: da coluna de texto até a margem direita.
     wide_w: f32,
@@ -1014,7 +1023,7 @@ struct Page {
     /// Linhas com imagem, desenhadas como faixas de trechos.
     img_rows: Vec<ImgRow>,
     /// Análise Markdown das linhas da última vez (só linhas novas são analisadas).
-    line_cache: HashMap<u64, md::LineInfo>,
+    line_hashes: Vec<u64>,
 }
 
 /// Imagem em linha pronta para desenhar: posição do glifo reservado e tamanho.
@@ -1248,16 +1257,35 @@ impl Tab {
         parts.join(&format!("\n{PAGE_BREAK}\n"))
     }
 
-    fn update_derived(&mut self, text: &str) {
-        let t = store::title_of(text);
-        self.title = if t.is_empty() { "Nova nota".to_string() } else { t };
-        self.words = text.split_whitespace().count();
-        self.chars = text.chars().count();
+    /// Título e contadores. Só as páginas alteradas (`counts == None`) são
+    /// contadas de novo: digitar numa nota de várias páginas não relê todas.
+    fn update_derived(&mut self) {
+        if self.pages.first().is_some_and(|p| p.counts.is_none()) {
+            let t = store::title_of(&self.pages[0].page_text());
+            self.title = if t.is_empty() { "Nova nota".to_string() } else { t };
+        }
+        let (mut words, mut chars) = (0, 0);
+        for p in &mut self.pages {
+            let (w, c) = match p.counts {
+                Some(wc) => wc,
+                None => {
+                    let t = p.page_text();
+                    let wc = (t.split_whitespace().count(), t.chars().count());
+                    p.counts = Some(wc);
+                    wc
+                }
+            };
+            words += w;
+            chars += c;
+        }
+        (self.words, self.chars) = (words, chars);
     }
 
+    /// Depois de editar a página atual.
     fn on_text_changed(&mut self) {
-        let text = self.text();
-        self.update_derived(&text);
+        let cur = self.cur;
+        self.pages[cur].counts = None;
+        self.update_derived();
         self.status = "editando…".to_string();
     }
 
@@ -1287,7 +1315,7 @@ impl Tab {
         }
         self.cur = self.cur.min(self.pages.len() - 1);
         self.saved_text = text.to_string();
-        self.update_derived(text);
+        self.update_derived();
     }
 
     /// Salva se mudou. Nota esvaziada vai para a lixeira. Devolve se gravou.
@@ -1347,12 +1375,18 @@ impl Page {
             line_shift: Vec::new(),
             inline_imgs: Vec::new(),
             img_rows: Vec::new(),
-            line_cache: HashMap::new(),
+            line_hashes: Vec::new(),
+            counts: None,
+            tables_fmt: HashSet::new(),
+            attr_keys: Vec::new(),
+            tables_key: 0,
         }
     }
 
     /// Troca o texto da página (cursor no fim, histórico limpo).
     fn set_text(&mut self, text: &str, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
+        self.counts = None;
+        self.attr_keys.clear();
         let attrs = Attrs::new().family(Family::SansSerif).color(WHITE);
         self.editor.with_buffer_mut(|b| b.set_text(text, &attrs, Shaping::Advanced, None));
         let end = self.end_cursor();
@@ -1433,15 +1467,15 @@ impl Page {
     /// Reaplica os estilos Markdown em todas as linhas.
     fn restyle(&mut self, fs: &mut FontSystem, images: &mut ImageCache, font_px: f32) {
         let texts = self.line_texts();
-        self.lines = md::analyze_cached(texts.iter().map(String::as_str), &mut self.line_cache);
+        let prev = std::mem::take(&mut self.lines);
+        self.lines = md::analyze_reuse(texts.iter().map(String::as_str), prev, &mut self.line_hashes);
         self.line_shift = compute_shifts(&self.lines, font_px);
         let cursor_line = self.editor.cursor().line;
-        self.build_columns(fs, font_px, cursor_line);
+        self.build_columns(fs, font_px, cursor_line, &texts);
         let cursor = self.editor.cursor();
-        self.build_tables(fs, font_px, cursor);
+        self.build_tables(fs, font_px, cursor, &texts);
         self.build_img_rows(fs, images, font_px, cursor_line, &texts);
-        let lens: Vec<usize> = texts.iter().map(String::len).collect();
-        self.apply_attrs(images, font_px, 0..lens.len(), &lens);
+        self.apply_attrs(images, font_px, 0..texts.len(), &texts);
     }
 
     /// Só os estilos das linhas `range` (a prévia de cor muda apenas a
@@ -1449,21 +1483,52 @@ impl Page {
     fn restyle_lines(&mut self, images: &mut ImageCache, font_px: f32, range: std::ops::Range<usize>) {
         let n = self.lines.len();
         let range = range.start.min(n)..range.end.min(n);
-        let mut lens = vec![0; range.start];
-        lens.extend(range.clone().map(|i| self.line_text(i).len()));
-        self.apply_attrs(images, font_px, range, &lens);
+        let mut texts = vec![String::new(); range.start];
+        texts.extend(range.clone().map(|i| self.line_text(i)));
+        self.apply_attrs(images, font_px, range, &texts);
     }
 
     /// Calcula e aplica os atributos das linhas `range` no buffer principal
-    /// (`lens[i]`: tamanho da linha `i`).
-    fn apply_attrs(&mut self, images: &mut ImageCache, font_px: f32, range: std::ops::Range<usize>, lens: &[usize]) {
+    /// (`texts[i]`: texto da linha `i`). Linhas cujo estilo não mudou desde a
+    /// última vez (mesma chave) ficam como estão: a cada tecla só a linha
+    /// editada e as vizinhas afetadas são refeitas.
+    fn apply_attrs(&mut self, images: &mut ImageCache, font_px: f32, range: std::ops::Range<usize>, texts: &[String]) {
         let cursor_line = self.editor.cursor().line;
         let row_h: Vec<(usize, f32)> = self.img_rows.iter().map(|r| (r.line, r.h)).collect();
         let lines = &self.lines;
+        if self.attr_keys.len() != lines.len() {
+            // Linhas entraram ou saíram: as chaves por posição não valem mais.
+            self.attr_keys = vec![0; lines.len()];
+        }
         let mut out: Vec<(usize, AttrsList)> = Vec::with_capacity(range.len());
         {
             for i in range {
                 let Some(info) = lines.get(i) else { break };
+                let preview_part = match self.preview {
+                    Some((a, b, c)) if i >= a.line && i <= b.line => Some((if i == a.line { a.index } else { 0 }, if i == b.line { b.index } else { usize::MAX }, c)),
+                    _ => None,
+                };
+                let img_missing = info.images.iter().any(|im| images.get(&im.path).is_none());
+                let tbl_h = (info.block == Block::Table).then(|| self.tables.iter().find(|t| i >= t.start && i <= t.end).map(|t| t.row_h.to_bits()));
+                let img_h = row_h.iter().find(|(l, _)| *l == i).map(|(_, h)| h.to_bits());
+                let col_h = (info.block == Block::ColStart).then(|| {
+                    let inner = lines[i + 1..].iter().take_while(|l| l.col.is_some() || matches!(l.block, Block::ColSep)).count();
+                    (self.columns.iter().find(|b| b.start == i).map(|b| b.height.to_bits()), inner)
+                });
+                // O hash da linha (texto + bloco de código) já determina os trechos.
+                let key = cache_key((
+                    self.line_hashes.get(i).copied().unwrap_or_else(|| cache_key(texts[i].as_str())),
+                    info.block,
+                    (info.folded, info.col),
+                    self.line_shift.get(i).copied().unwrap_or(0),
+                    (tbl_h, img_h, col_h),
+                    preview_part,
+                    (i == cursor_line, img_missing, font_px.to_bits()),
+                ));
+                if self.attr_keys[i] == key {
+                    continue;
+                }
+                self.attr_keys[i] = key;
                 let mut base = Attrs::new().family(Family::SansSerif).color(WHITE).letter_spacing(tracking(font_px));
                 let mut line_h = body_lh(font_px);
                 match info.block {
@@ -1520,7 +1585,7 @@ impl Page {
                 let preview_spans;
                 let spans: &[(std::ops::Range<usize>, md::Flags)] = match self.preview {
                     Some((a, b, c)) if i >= a.line && i <= b.line => {
-                        let len = lens[i];
+                        let len = texts[i].len();
                         let start = if i == a.line { a.index } else { 0 };
                         let end = if i == b.line { b.index } else { len };
                         preview_spans = md::recolor(&info.spans, len, start..end, c);
@@ -1528,7 +1593,6 @@ impl Page {
                     }
                     _ => &info.spans,
                 };
-                let img_missing = info.images.iter().any(|im| images.get(&im.path).is_none());
                 for (r, f) in spans {
                     list.add_span(r.clone(), &attrs_for(base.clone(), *f, i == cursor_line || img_missing, line_h));
                 }
@@ -1730,9 +1794,8 @@ impl Page {
     }
 
     /// Monta um sub-buffer por coluna de cada bloco `:::`.
-    fn build_columns(&mut self, fs: &mut FontSystem, font_px: f32, cursor_line: usize) {
+    fn build_columns(&mut self, fs: &mut FontSystem, font_px: f32, cursor_line: usize, texts: &[String]) {
         let mut old = Reuse::new(std::mem::take(&mut self.columns).into_iter().flat_map(|b| b.cols).map(|c| (c.key, c)));
-        let texts = self.line_texts();
         let text_w = if self.editor_size.0 > 0.0 { self.editor_size.0 } else { 600.0 };
         let gap = (font_px * 1.4).round();
         let pad = (font_px * 0.5).round();
@@ -1835,9 +1898,22 @@ impl Page {
     /// algarismos tabulares), largura da coluna = célula mais larga + padding,
     /// números à direita salvo alinhamento declarado em `:---:`; se não cabe
     /// na medida, a fonte da tabela encolhe (até 55 %).
-    fn build_tables(&mut self, fs: &mut FontSystem, font_px: f32, cursor: Cursor) {
+    fn build_tables(&mut self, fs: &mut FontSystem, font_px: f32, cursor: Cursor, texts: &[String]) {
+        // Nada mudou nas tabelas (texto, cursor dentro delas, fonte, largura):
+        // o layout atual continua valendo.
+        let in_tbl = |l: &md::LineInfo| matches!(l.block, Block::Table | Block::TableSep) && l.col.is_none() && !l.folded;
+        let key = cache_key((
+            self.lines.iter().enumerate().filter(|(_, l)| in_tbl(l)).map(|(i, _)| (i, self.line_hashes.get(i).copied().unwrap_or(0))).collect::<Vec<_>>(),
+            self.lines.get(cursor.line).filter(|l| in_tbl(l)).map(|_| (cursor.line, cursor.index)),
+            font_px.to_bits(),
+            self.wide_w.to_bits(),
+            self.editor_size.0.to_bits(),
+        ));
+        if key == self.tables_key {
+            return;
+        }
+        self.tables_key = key;
         let mut old = Reuse::new(std::mem::take(&mut self.tables).into_iter().flat_map(|t| t.rows).flat_map(|r| r.cells).map(|c| (c.key, c)));
-        let texts = self.line_texts();
         // Tabelas podem passar da medida do texto até a margem direita da janela.
         let text_w = if self.editor_size.0 > 0.0 { self.wide_w.max(self.editor_size.0) } else { 600.0 };
         let is_tbl = |l: &md::LineInfo| matches!(l.block, Block::Table | Block::TableSep) && l.col.is_none() && !l.folded;
@@ -2083,6 +2159,8 @@ enum Deco {
     /// Timer `⏱ 25m`: área clicável e trilho de progresso sob o texto
     /// (`frac`: parte já corrida; `running`: rodando ou pausado).
     Timer { rect: Rect, line: usize, track: (i32, i32, i32), frac: Option<f32>, running: bool },
+    /// Régua `___`: altura (y) e espessura; desenhada depois de todas as páginas.
+    FullRule { y: i32, t: i32 },
 }
 
 struct Ui {
@@ -2269,7 +2347,20 @@ impl Ui {
                 j += 1;
             }
             let block: Vec<&str> = texts[i..j].iter().map(String::as_str).collect();
+            let key = cache_key(&block);
+            if tab.tables_fmt.contains(&key) {
+                i = j;
+                continue;
+            }
             let formatted = md::format_table(&block);
+            if formatted.iter().zip(&block).all(|(a, b)| a == b) {
+                if tab.tables_fmt.len() > 4096 {
+                    tab.tables_fmt.clear();
+                }
+                tab.tables_fmt.insert(key);
+                i = j;
+                continue;
+            }
             tab.editor.start_change();
             for (k, new) in formatted.iter().enumerate() {
                 let li = i + k;
@@ -2533,6 +2624,7 @@ impl Ui {
         let mut cells = Vec::new();
         let mut img_hits = Vec::new();
         let mut seg_hits: Vec<SegHit> = Vec::new();
+        let mut full_rules: Vec<(i32, i32)> = Vec::new();
         let div_active = self.col_div_active();
         {
             let Ui { font_system, swash, tabs, active, traced, images, prof, img_sel, img_hover, img_ghost, .. } = self;
@@ -2579,6 +2671,11 @@ impl Ui {
             let full = ((editor.x + ml - ox) as f32, (editor.right() - ml - ox) as f32);
             let row_lines: Vec<usize> = tab.img_rows.iter().map(|r| r.line).collect();
             let decos = tab.editor.with_buffer(|b| collect_decos(b, &all, font_px, text_w, scale, &[], &tab.line_shift, &row_lines, full));
+            for d in &decos {
+                if let Deco::FullRule { y, t } = *d {
+                    full_rules.push((oy + y, t));
+                }
+            }
             draw_decos(canvas, decos, ox, oy, &mut checkboxes, &mut toggles, &mut timers);
             // ---- colunas: sub-buffers no espaço da linha `:::` ----
             let sel = tab.editor.selection_bounds();
@@ -2798,10 +2895,10 @@ impl Ui {
             // Prévia da imagem sendo arrastada: 50 % de opacidade e menos saturada,
             // no ponto onde ela cairia.
             if let Some(g) = img_ghost.as_ref().filter(|_| is_cur) {
-                if let (Some((x, y, _)), Some(bm)) = (tab.caret_xy(g.target), images.scaled(&g.path, g.w)) {
+                if let (Some((x, y, _)), Some(bm)) = (tab.caret_xy(g.target), images.ghost(&g.path, g.w)) {
                     let (x, y) = (ox + x.round() as i32, oy + y.round() as i32);
                     canvas.set_clip(editor);
-                    canvas.blit_ghost(x, y, bm.w, bm.h, &bm.rgba);
+                    canvas.blit_rgba(x, y, bm.w, bm.h, &bm.rgba);
                     canvas.rect(x - cursor_w, y, cursor_w, bm.h as i32, DIM);
                 }
             }
@@ -2846,6 +2943,13 @@ impl Ui {
             prof_add(prof, P_DECOS, pt);
             pt = Instant::now();
         }
+        // Réguas `___`: de margem a margem da janela, por cima das páginas
+        // vizinhas (cujas tabelas e imagens pintam fundo preto).
+        canvas.set_clip(editor);
+        for (y, t) in full_rules {
+            canvas.rect(editor.x + ml, y - t / 2, editor.w - 2 * ml, t, white(0x40));
+        }
+        canvas.reset_clip();
         let page_add = {
             // "+" depois da última página; se ela passa da janela, preso à borda visível.
             let b = (font_px * 1.5).round() as i32;
@@ -2856,6 +2960,12 @@ impl Ui {
         if page_add.w > 0 && page_add.x < editor.right() {
             let hot = page_add.contains(self.hover.0, self.hover.1);
             canvas.set_clip(editor);
+            let last_right = ox_base + self.tab().pages.len() as i32 * pitch - page_gap - hs;
+            if page_add.x < last_right + page_gap {
+                // Preso à borda, por cima de uma página: botão com fundo e contorno.
+                let m = self.px(3.0);
+                canvas.rounded_outline(page_add.x - m, page_add.y - m, page_add.w + 2 * m, page_add.h + 2 * m, self.px(RADIUS_SM) + m, BORDER, BLACK);
+            }
             if hot {
                 canvas.rounded_rect(page_add.x, page_add.y, page_add.w, page_add.h, self.px(RADIUS_SM), HOVER);
             }
@@ -2869,40 +2979,7 @@ impl Ui {
 
         // ---- rodapé ----
         let fy = h - footer_h;
-        canvas.rect(0, fy, w, 1, LINE);
-        let fcy = fy + footer_h / 2;
-        let (status, words, chars, page) = {
-            let t = self.tab();
-            let page = if t.pages.len() > 1 { format!("página {} de {}  ·  ", t.cur + 1, t.pages.len()) } else { String::new() };
-            // Timer rodando nesta nota: contagem regressiva no lugar do status.
-            let now = agenda::now();
-            let timer = t.pages.iter().find_map(|p| {
-                p.lines.iter().enumerate().find_map(|(li, info)| match info.timer.as_ref().map(|t| t.state) {
-                    Some(agenda::TState::Run(sod)) => Some(format!(
-                        "⏱ {} · {}",
-                        agenda::fmt_left(agenda::resolve_clock(sod, now) - now),
-                        agenda::title_of_line(&p.line_text(li))
-                    )),
-                    _ => None,
-                })
-            });
-            (timer.unwrap_or_else(|| t.status.clone()), t.words, t.chars, page)
-        };
-        let counter = format!(
-            "{page}{} {}  ·  {} {}",
-            words,
-            if words == 1 { "palavra" } else { "palavras" },
-            chars,
-            if chars == 1 { "caractere" } else { "caracteres" }
-        );
-        let cw = self.label(canvas, &counter, w - self.px(SP4), fcy, UI_FONT_SM, Weight::NORMAL, DIM2, 2, None);
-        let sw = self.label(canvas, &status, self.px(SP4), fcy, UI_FONT_SM, Weight::NORMAL, DIM, 0, Some((w / 3) as f32));
-        let hint = "Ctrl+L notas · Ctrl+N nova · Ctrl+. emoji · Ctrl+, símbolos · Shift+Enter quebra curta · Esc sair";
-        let hx = self.px(SP4) + sw + self.px(SP6);
-        let hint_max = (w - self.px(SP4) - cw - self.px(SP6) - hx).max(0) as f32;
-        if hint_max > self.px(60.0) as f32 {
-            self.label(canvas, hint, hx, fcy, UI_FONT_SM, Weight::NORMAL, DIM2, 0, Some(hint_max));
-        }
+        self.paint_footer(canvas);
 
         t(self, "paint: rodapé");
         self.traced = true;
@@ -2953,6 +3030,127 @@ impl Ui {
             page_grips,
             page_add,
         };
+    }
+
+    /// Rodapé: status (ou a contagem do timer), dica de atalhos e contadores.
+    /// Também é tudo o que o tique do timer redesenha (`App::draw`).
+    fn paint_footer(&mut self, canvas: &mut Canvas) {
+        let (w, h) = (canvas.w, canvas.h);
+        let footer_h = self.px(FOOTER_H);
+        let fy = h - footer_h;
+        canvas.rect(0, fy, w, footer_h, BLACK);
+        canvas.rect(0, fy, w, 1, LINE);
+        let fcy = fy + footer_h / 2;
+        let (status, timer, words, chars, page) = {
+            let t = self.tab();
+            let page = if t.pages.len() > 1 { format!("página {} de {}  ·  ", t.cur + 1, t.pages.len()) } else { String::new() };
+            // Timer rodando nesta nota: contagem regressiva no lugar do status.
+            let now = agenda::now();
+            let timer = t.pages.iter().find_map(|p| {
+                p.lines.iter().enumerate().find_map(|(li, info)| match info.timer.as_ref().map(|t| t.state) {
+                    Some(agenda::TState::Run(sod)) => Some((agenda::fmt_left(agenda::resolve_clock(sod, now) - now), agenda::title_of_line(&p.line_text(li)))),
+                    _ => None,
+                })
+            });
+            (t.status.clone(), timer, t.words, t.chars, page)
+        };
+        // Os números mudam a cada tecla: só eles são moldados; as palavras ficam no cache.
+        let (ws, cs) = (words.to_string(), chars.to_string());
+        let parts = [
+            (page.as_str(), false),
+            (ws.as_str(), true),
+            (if words == 1 { " palavra  ·  " } else { " palavras  ·  " }, false),
+            (cs.as_str(), true),
+            (if chars == 1 { " caractere" } else { " caracteres" }, false),
+        ];
+        let cw = self.label_row(canvas, &parts, w - self.px(SP4), fcy, DIM2);
+        let x0 = self.px(SP4);
+        let sw = match timer {
+            // Em três pedaços: o `⏱` (emoji, molde caro) e o título ficam no
+            // cache; só os algarismos, que mudam a cada segundo, são moldados.
+            Some((left, title)) => {
+                let mut x = x0;
+                x += self.label(canvas, agenda::TIMER, x, fcy, UI_FONT_SM, Weight::NORMAL, DIM, 0, None);
+                // Largura fixa (a de "0:00" com o mesmo número de algarismos),
+                // para o resto do rodapé não tremer a cada segundo.
+                let slot = self.text_w_cached(&format!(" {}", left.replace(|c: char| c.is_ascii_digit(), "0")), UI_FONT_SM) + self.px(2.0);
+                x += self.label_once(canvas, &format!(" {left}"), x, fcy, UI_FONT_SM, DIM).max(slot);
+                let rest = ((w / 3) - (x - x0)).max(0) as f32;
+                x += self.label(canvas, &format!(" · {title}"), x, fcy, UI_FONT_SM, Weight::NORMAL, DIM, 0, Some(rest));
+                x - x0
+            }
+            None => self.label(canvas, &status, x0, fcy, UI_FONT_SM, Weight::NORMAL, DIM, 0, Some((w / 3) as f32)),
+        };
+        let hint = "Ctrl+L notas · Ctrl+N nova · Ctrl+. emoji · Ctrl+, símbolos · Shift+Enter quebra curta · Esc sair";
+        let hx = x0 + sw + self.px(SP6);
+        let hint_max = (w - self.px(SP4) - cw - self.px(SP6) - hx).max(0) as f32;
+        if hint_max > self.px(60.0) as f32 {
+            self.label(canvas, hint, hx, fcy, UI_FONT_SM, Weight::NORMAL, DIM2, 0, Some(hint_max));
+        }
+    }
+
+    /// Largura de um rótulo (moldado uma vez e guardado no cache de rótulos).
+    fn text_w_cached(&mut self, text: &str, size: f32) -> i32 {
+        let key = LabelKey { text: text.to_string(), size: size.to_bits(), weight: Weight::NORMAL.0, max_w: None, scale: self.scale };
+        if let Some((_, b)) = self.labels.iter().find(|(k, _)| *k == key) {
+            return Self::text_width(b).ceil() as i32;
+        }
+        let b = self.make_text(text, size, Weight::NORMAL, None);
+        let w = Self::text_width(&b).ceil() as i32;
+        if self.labels.len() >= LABEL_CACHE {
+            self.labels.remove(0);
+        }
+        self.labels.push((key, b));
+        w
+    }
+
+    /// Rótulo em pedaços alinhado à direita em `right`: `(texto, volátil)`;
+    /// os voláteis (números) são moldados na hora, os outros vêm do cache.
+    fn label_row(&mut self, canvas: &mut Canvas, parts: &[(&str, bool)], right: i32, cy: i32, color: Color) -> i32 {
+        let mut widths = Vec::with_capacity(parts.len());
+        let mut bufs = Vec::new();
+        for &(t, volatile) in parts {
+            if t.is_empty() {
+                widths.push(0);
+            } else if volatile {
+                let b = self.make_text(t, UI_FONT_SM, Weight::NORMAL, None);
+                widths.push(Self::text_width(&b).ceil() as i32);
+                bufs.push(b);
+            } else {
+                widths.push(self.text_w_cached(t, UI_FONT_SM));
+            }
+        }
+        let total: i32 = widths.iter().sum();
+        let lh = (UI_FONT_SM * self.scale as f32 * UI_LEADING).round() as i32;
+        let mut x = right - total;
+        let mut bufs = bufs.into_iter();
+        for (&(t, volatile), w) in parts.iter().zip(widths) {
+            if t.is_empty() {
+                continue;
+            }
+            if volatile {
+                let b = bufs.next().expect("um buffer por pedaço volátil");
+                let Ui { font_system, swash, .. } = self;
+                let mut r = FastRenderer { canvas, fs: font_system, cache: swash, ox: x, oy: cy - lh / 2 };
+                render_buffer(&b, &mut r, color);
+            } else {
+                self.label(canvas, t, x, cy, UI_FONT_SM, Weight::NORMAL, color, 0, None);
+            }
+            x += w;
+        }
+        total
+    }
+
+    /// Rótulo que muda a todo instante (contagem): moldado e desenhado sem
+    /// entrar no cache, para não expulsar os rótulos que se repetem.
+    fn label_once(&mut self, canvas: &mut Canvas, text: &str, x: i32, cy: i32, size: f32, color: Color) -> i32 {
+        let b = self.make_text(text, size, Weight::NORMAL, None);
+        let lh = (size * self.scale as f32 * UI_LEADING).round() as i32;
+        let w = Self::text_width(&b).ceil() as i32;
+        let Ui { font_system, swash, .. } = self;
+        let mut r = FastRenderer { canvas, fs: font_system, cache: swash, ox: x, oy: cy - lh / 2 };
+        render_buffer(&b, &mut r, color);
+        w
     }
 
     fn paint_tabs(&mut self, canvas: &mut Canvas, x0: i32, x1: i32, header_h: i32) -> (Vec<(Rect, usize)>, Vec<(Rect, usize)>) {
@@ -3403,6 +3601,8 @@ fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxe
                 }
                 checkboxes.push((r, line, idx));
             }
+            // Coletada à parte em `paint` (desenhada por cima de todas as páginas).
+            Deco::FullRule { .. } => {}
             Deco::Timer { rect, line, track: (x, y, w), frac, running } => {
                 // Rodando/pausado: pílula translúcida por cima do `⏱ 25m` que
                 // se enche da esquerda conforme o tempo passa. Parado: sublinhado
@@ -3450,6 +3650,7 @@ fn collect_decos(b: &Buffer, lines: &[&md::LineInfo], font_px: f32, text_w: f32,
             let h = run.line_height as i32;
             let glyph_at = |idx: usize| run.glyphs.iter().find(|g| g.start == idx);
             match info.block {
+                Block::Rule if info.full_rule && in_main => out.push(Deco::FullRule { y: top + h / 2, t: thin }),
                 Block::Rule => {
                     let (x0, x1) = if info.full_rule { (full.0 as i32, full.1 as i32) } else { (0, text_w as i32) };
                     out.push(Deco::Line { x0, y0: top + h / 2, x1, y1: top + h / 2, t: thin, c: white(0x40) });
@@ -3578,6 +3779,14 @@ struct App {
     exit: bool,
     frame_pending: bool,
     needs_redraw: bool,
+    /// Algo além do rodapé mudou desde o último quadro inteiro.
+    body_dirty: bool,
+    /// Geração do conteúdo acima do rodapé, e a que cada quadro do pool tem:
+    /// o tique do timer só repinta o rodapé num quadro que já está em dia.
+    body_gen: u64,
+    slot_gen: [u64; 3],
+    /// Degraus de progresso dos timers rodando no último quadro inteiro.
+    timer_sig: u64,
     pending_token: Option<String>,
     modifiers: Modifiers,
     last_serial: u32,
@@ -3751,6 +3960,10 @@ fn main() {
         exit: false,
         frame_pending: false,
         needs_redraw: false,
+        body_dirty: true,
+        body_gen: 0,
+        slot_gen: [u64::MAX; 3],
+        timer_sig: 0,
         pending_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
         modifiers: Modifiers::default(),
         last_serial: 0,
@@ -3829,6 +4042,9 @@ fn main() {
         if app.exit {
             break;
         }
+        if app.needs_redraw && !app.frame_pending && app.configured {
+            app.draw();
+        }
     }
     app.ui.save_all();
     app.ui.persist_state();
@@ -3901,7 +4117,10 @@ impl App {
             }
             _ => {}
         }
-        self.request_redraw();
+        // Movimento do mouse pede redesenho só quando algo muda (como no uso real).
+        if cmd != "move" {
+            self.request_redraw();
+        }
     }
 
     fn activate(&mut self, token: &str) {
@@ -3963,6 +4182,8 @@ impl App {
                 page.tables.clear();
                 page.columns.clear();
                 page.img_rows.clear();
+                page.attr_keys.clear();
+                page.tables_key = 0;
                 page.restyle(font_system, images, fp);
             }
         }
@@ -3973,13 +4194,19 @@ impl App {
     // ---------- redesenho ----------
 
     fn request_redraw(&mut self) {
-        if !self.configured {
-            return;
-        }
-        if self.frame_pending {
+        self.body_dirty = true;
+        self.request_tick_redraw();
+    }
+
+    /// Redesenho em que só o rodapé muda (contagem do timer): `draw` repinta
+    /// só ele quando o quadro livre já tem o resto em dia.
+    ///
+    /// Nada é pintado aqui: o laço principal pinta um quadro ao fim de cada
+    /// lote de eventos (várias teclas ou movimentos do mouse viram um quadro
+    /// só, e o pisca do cursor pedido junto com a tecla não pinta de novo).
+    fn request_tick_redraw(&mut self) {
+        if self.configured {
             self.needs_redraw = true;
-        } else {
-            self.draw();
         }
     }
 
@@ -3989,13 +4216,14 @@ impl App {
         let height = (self.ui.height as i32 * scale).max(1);
         let stride = width * 4;
         let frame_len = (height * stride) as usize;
-        let App { pool, pool_frame, buffers, shm, ui, window, qh, needs_redraw, compositor, .. } = self;
+        let App { pool, pool_frame, buffers, shm, ui, window, qh, needs_redraw, compositor, body_dirty, body_gen, slot_gen, .. } = self;
 
         // O pool do wl_shm só cresce (a biblioteca dobra o tamanho a cada
         // alocação que não cabe). Para a memória ficar em exatamente dois
         // quadros, o pool é recriado quando o tamanho da janela muda.
         if *pool_frame != frame_len {
             *buffers = [None, None, None];
+            *slot_gen = [u64::MAX; 3];
             *pool = SlotPool::new(frame_len * 2, shm).expect("shm pool");
             *pool_frame = frame_len;
             // Janela opaca: o compositor não precisa misturar (blend) nada.
@@ -4029,13 +4257,29 @@ impl App {
                 2
             }
         };
+        if buffers[i].is_none() {
+            slot_gen[i] = u64::MAX;
+        }
         let buf = buffers[i].get_or_insert_with(|| {
             pool.create_buffer(width, height, stride, wl_shm::Format::Xrgb8888).expect("create buffer").0
         });
         let canvas_bytes = pool.canvas(buf).expect("quadro livre");
         let mut canvas = Canvas::new(canvas_bytes, width, height);
         let t0 = Instant::now();
-        ui.paint(&mut canvas);
+        if std::mem::take(body_dirty) {
+            *body_gen += 1;
+        }
+        // Só o rodapé mudou e este quadro já tem o resto atual (painéis abertos
+        // podem cobrir o rodapé: aí redesenha tudo).
+        let overlay = ui.list_open || ui.picker.is_some() || ui.glyphs.is_some() || ui.slash.is_some() || ui.ctx.is_some();
+        let footer_only = slot_gen[i] == *body_gen && !overlay;
+        let footer_h = (FOOTER_H * scale as f32).round() as i32;
+        if footer_only {
+            ui.paint_footer(&mut canvas);
+        } else {
+            ui.paint(&mut canvas);
+            slot_gen[i] = *body_gen;
+        }
         prof_add(&mut ui.prof, P_FRAME, t0);
         let t0 = Instant::now();
         // `FASTNOTES_SNAPSHOT=arquivo.ppm` grava o último quadro (para testes).
@@ -4052,7 +4296,11 @@ impl App {
         }
 
         let surface = window.wl_surface();
-        surface.damage_buffer(0, 0, width, height);
+        if footer_only {
+            surface.damage_buffer(0, height - footer_h, width, footer_h);
+        } else {
+            surface.damage_buffer(0, 0, width, height);
+        }
         surface.frame(qh, FrameCallbackData(surface.clone()));
         buf.attach_to(surface).expect("attach");
         window.commit();
@@ -4154,7 +4402,28 @@ impl App {
         }
         self.event_alarms(now);
         if running {
-            self.request_redraw();
+            // Quadro inteiro só quando a pílula de algum timer cresce um pixel
+            // (largura real da pílula na página atual; nas outras, 1 %).
+            let mut steps = Vec::new();
+            let cur = self.ui.tab().cur;
+            for (pi, page) in self.ui.tab().pages.iter().enumerate() {
+                for (li, info) in page.lines.iter().enumerate() {
+                    if let Some(t) = &info.timer {
+                        if let agenda::TState::Run(sod) = t.state {
+                            let left = (agenda::resolve_clock(sod, now) - now).max(0);
+                            let px = self.ui.hits.timers.iter().find(|(_, l)| pi == cur && *l == li).map_or(100, |(r, _)| r.w.max(1) as i64);
+                            steps.push((pi, li, left * px / t.secs.max(1) as i64));
+                        }
+                    }
+                }
+            }
+            let sig = cache_key(&steps);
+            if sig != self.timer_sig {
+                self.timer_sig = sig;
+                self.request_redraw();
+            } else {
+                self.request_tick_redraw();
+            }
         }
         Duration::from_secs(if running { 1 } else { 30 })
     }
@@ -4162,25 +4431,30 @@ impl App {
     /// Avisos no PC dos eventos (`📅`) das notas abertas; o bot do Telegram
     /// faz o mesmo para todas as notas, e a marca em comum evita repetir.
     fn event_alarms(&mut self, now: i64) {
+        // Só as linhas com evento (já analisadas); o texto só é lido na hora do aviso.
+        let mut due = Vec::new();
         for tab in &self.ui.tabs {
             for page in &tab.pages {
-                for li in 0..page.lines.len() {
-                    let text = page.line_text(li);
-                    if !text.contains(agenda::EVENT) || agenda::is_done(&text) {
+                for (li, info) in page.lines.iter().enumerate() {
+                    let Some(e) = &info.event else { continue };
+                    if matches!(info.block, Block::Task(true)) {
                         continue;
                     }
-                    let Some(e) = agenda::parse_event(&text, now) else { continue };
-                    let title = agenda::title_of_line(&text);
                     for (kind, at) in [("antes", e.when - agenda::EARLY_SECS), ("hora", e.when)] {
                         if kind == "antes" && (!e.has_time || now >= e.when) {
                             continue;
                         }
-                        if now >= at && now - at < agenda::GRACE_SECS && agenda::claim(&format!("pc:{kind}:{}:{title}", e.when)) {
-                            let head = if kind == "antes" { "📅 Daqui a 10 minutos" } else { "📅 Agora" };
-                            agenda::notify(head, &format!("{title} · {}", agenda::fmt_when(e.when, e.has_time)));
+                        if now >= at && now - at < agenda::GRACE_SECS {
+                            due.push((kind, e.clone(), agenda::title_of_line(&page.line_text(li))));
                         }
                     }
                 }
+            }
+        }
+        for (kind, e, title) in due {
+            if agenda::claim(&format!("pc:{kind}:{}:{title}", e.when)) {
+                let head = if kind == "antes" { "📅 Daqui a 10 minutos" } else { "📅 Agora" };
+                agenda::notify(head, &format!("{title} · {}", agenda::fmt_when(e.when, e.has_time)));
             }
         }
     }
@@ -4212,6 +4486,7 @@ impl App {
         if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
             page.undo.record(ch, true);
         }
+        page.counts = None;
         page.restyle(font_system, images, fp);
         tabs[ti].on_text_changed();
         self.schedule_autosave();
@@ -4231,6 +4506,7 @@ impl App {
         if let Some(ch) = change.filter(|c| !c.items.is_empty()) {
             page.undo.record(ch, true);
         }
+        page.counts = None;
         page.restyle(font_system, images, fp);
         tabs[ti].on_text_changed();
         self.schedule_autosave();

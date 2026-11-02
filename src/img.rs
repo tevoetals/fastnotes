@@ -115,11 +115,13 @@ pub struct ImageCache {
     pub base: PathBuf,
     decoded: HashMap<String, Option<Rc<Bitmap>>>,
     scaled: HashMap<(String, u32), Rc<Bitmap>>,
+    /// Prévia de arraste (meia opacidade, pouca cor) da última imagem arrastada.
+    ghost: Option<((String, u32), Rc<Bitmap>)>,
 }
 
 impl ImageCache {
     pub fn new(base: PathBuf) -> ImageCache {
-        ImageCache { base, decoded: HashMap::new(), scaled: HashMap::new() }
+        ImageCache { base, decoded: HashMap::new(), scaled: HashMap::new(), ghost: None }
     }
 
     pub fn resolve(&self, path: &str) -> PathBuf {
@@ -144,6 +146,32 @@ impl ImageCache {
     pub fn forget(&mut self, path: &str) {
         self.decoded.remove(path);
         self.scaled.retain(|(p, _), _| p != path);
+        self.ghost = None;
+    }
+
+    /// Prévia de arraste: 50 % de opacidade e 30 % da cor original, calculada
+    /// uma vez por arraste (não a cada quadro).
+    pub fn ghost(&mut self, path: &str, width: u32) -> Option<Rc<Bitmap>> {
+        let key = (path.to_string(), width);
+        if let Some((k, g)) = &self.ghost {
+            if *k == key {
+                return Some(g.clone());
+            }
+        }
+        let bm = self.scaled(path, width)?;
+        let mut rgba = bm.rgba.clone();
+        for px in rgba.chunks_exact_mut(4) {
+            let (r, g, b) = (px[0] as u32, px[1] as u32, px[2] as u32);
+            let gray = (r * 77 + g * 150 + b * 29) >> 8;
+            let mix = |c: u32| ((c * 3 + gray * 7) / 10) as u8;
+            px[0] = mix(r);
+            px[1] = mix(g);
+            px[2] = mix(b);
+            px[3] /= 2;
+        }
+        let g = Rc::new(Bitmap { w: bm.w, h: bm.h, rgba });
+        self.ghost = Some((key, g.clone()));
+        Some(g)
     }
 
     /// Versão redimensionada para caber em `width` px (nunca amplia).

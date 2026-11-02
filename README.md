@@ -564,10 +564,17 @@ flatpak run io.github.tevoetals.fastnotes
   As fontes curadas (Noto) ficam mapeadas do disco; o banco completo de fontes
   do sistema só é carregado se uma nota tiver caracteres fora delas (CJK,
   árabe, hebraico…) e, nesse caso, a memória compartilhada de arquivos sobe.
-- **CPU:** zero parado (sem timers). Cada tecla custa ~1 ms de layout e ~3 ms
-  de desenho numa janela de 1200×800; o cursor pisca por 5 s depois da última
-  tecla e depois para. O buffer é XRGB opaco, então o compositor não precisa
-  misturar nada.
+- **CPU:** zero parado. Cada tecla custa ~0,5 ms de layout e ~2–3 ms de
+  desenho numa nota pesada (3 páginas, tabelas, colunas e imagens): só as
+  linhas alteradas são analisadas e estilizadas de novo, e tabelas, colunas e
+  faixas de imagem reaproveitam o texto já moldado. Vários eventos seguidos
+  (teclas, mouse) viram um quadro só, desenhado ao fim do lote. O cursor pisca
+  por 5 s depois da última tecla e depois para. O buffer é XRGB opaco, então
+  o compositor não precisa misturar nada.
+- **Timer rodando:** ~1 ms de CPU por segundo. A cada segundo só o rodapé
+  (a contagem) é redesenhado e enviado ao compositor; a janela inteira só
+  quando a pílula do timer cresce um pixel. Sem timer, o relógio da agenda
+  acorda a cada 30 s e olha só as linhas que já têm evento.
 
 ## Limitações
 

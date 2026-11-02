@@ -87,6 +87,8 @@ pub struct LineInfo {
     pub full_rule: bool,
     /// Timer de uma tarefa (`⏱ 25m`).
     pub timer: Option<crate::agenda::TimerMark>,
+    /// Evento com data (`📅 07/10 14:30`): o relógio da agenda olha só isto.
+    pub event: Option<crate::agenda::EventMark>,
 }
 
 pub const TOGGLE_OPEN: &str = "▾";
@@ -103,35 +105,61 @@ impl LineInfo {
 }
 
 pub fn analyze<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<LineInfo> {
-    analyze_cached(lines, &mut HashMap::new())
+    analyze_reuse(lines, Vec::new(), &mut Vec::new())
 }
 
-/// Como `analyze`, reaproveitando a análise de linhas que não mudaram desde a
-/// última chamada (`cache`: hash da linha e do estado de bloco de código →
-/// resultado). A cada tecla só a linha editada é analisada de novo.
-pub fn analyze_cached<'a>(lines: impl IntoIterator<Item = &'a str>, cache: &mut HashMap<u64, LineInfo>) -> Vec<LineInfo> {
+/// Como `analyze`, reaproveitando `prev` (a análise anterior, movida e não
+/// copiada) para as linhas que não mudaram. `hashes` guarda o hash de cada
+/// linha (texto + estado de bloco de código) entre as chamadas. A cada tecla
+/// só a linha editada é analisada de novo.
+pub fn analyze_reuse<'a>(lines: impl IntoIterator<Item = &'a str>, prev: Vec<LineInfo>, hashes: &mut Vec<u64>) -> Vec<LineInfo> {
     let lines: Vec<&str> = lines.into_iter().collect();
+    let mut prev: Vec<Option<LineInfo>> = prev.into_iter().map(Some).collect();
+    let old = std::mem::take(hashes);
+    // Linha em outra posição (linhas inseridas/removidas acima): por hash.
+    let mut by_hash: Option<HashMap<u64, Vec<usize>>> = None;
     let mut out: Vec<LineInfo> = Vec::with_capacity(lines.len());
     let mut in_code = false;
-    let mut next: HashMap<u64, LineInfo> = HashMap::with_capacity(lines.len());
-    for line in &lines {
+    for (i, line) in lines.iter().enumerate() {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (line, in_code).hash(&mut h);
         let key = h.finish();
-        let info = match cache.remove(&key).or_else(|| next.get(&key).cloned()) {
-            Some(info) => {
-                // Só a cerca ``` muda o estado de código.
+        let mut reuse = if old.get(i) == Some(&key) { prev.get_mut(i).and_then(Option::take) } else { None };
+        if reuse.is_none() && !prev.is_empty() {
+            let map = by_hash.get_or_insert_with(|| {
+                let mut m: HashMap<u64, Vec<usize>> = HashMap::new();
+                for (j, k) in old.iter().enumerate().rev() {
+                    m.entry(*k).or_default().push(j);
+                }
+                m
+            });
+            if let Some(js) = map.get_mut(&key) {
+                while let Some(j) = js.pop() {
+                    if let Some(x) = prev.get_mut(j).and_then(Option::take) {
+                        reuse = Some(x);
+                        break;
+                    }
+                }
+            }
+        }
+        let info = match reuse {
+            // As linhas de colunas foram trocadas pela versão estrutural no
+            // passo abaixo: essas são analisadas de novo (são poucas).
+            Some(mut info) if !matches!(info.block, Block::ColStart | Block::ColSep | Block::ColEnd) => {
+                // Campos que o passo abaixo recalcula.
+                info.header = false;
+                info.col = None;
+                info.folded = false;
                 if info.block == Block::Fence {
                     in_code = !in_code;
                 }
                 info
             }
-            None => analyze_line(line, &mut in_code),
+            _ => analyze_line(line, &mut in_code),
         };
-        next.insert(key, info.clone());
+        hashes.push(key);
         out.push(info);
     }
-    *cache = next;
     for i in 1..out.len() {
         if out[i].block == Block::TableSep && out[i - 1].block == Block::Table {
             out[i - 1].header = true;
@@ -229,6 +257,7 @@ fn empty_info() -> LineInfo {
         hard_break: false,
         full_rule: false,
         timer: None,
+        event: None,
     }
 }
 
@@ -459,8 +488,11 @@ fn analyze_line(line: &str, in_code: &mut bool) -> LineInfo {
             info.timer = Some(t);
         }
     }
-    if let Some(e) = crate::agenda::parse_event(line, crate::agenda::now()).filter(|e| e.at >= content) {
-        set(&mut flags, e.at..e.end, |f| f.dim = true);
+    if line.contains(crate::agenda::EVENT) {
+        if let Some(e) = crate::agenda::parse_event(line, crate::agenda::now()).filter(|e| e.at >= content) {
+            set(&mut flags, e.at..e.end, |f| f.dim = true);
+            info.event = Some(e);
+        }
     }
     // Quebra dura: número ímpar de `\` no fim (o último é o marcador).
     if info.block != Block::Table && len > content {

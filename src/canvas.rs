@@ -241,51 +241,10 @@ impl<'a> Canvas<'a> {
         self.rounded_rect(x + 1, y + 1, w - 2, h - 2, (radius - 1).max(0), fill);
     }
 
-    /// Copia um bitmap RGBA com mistura de alpha, recortado pelo clip.
+    /// Copia um bitmap RGBA com mistura de alpha, recortado pelo clip
+    /// (linha a linha, sem índice por pixel: imagens são desenhadas todo quadro).
     pub fn blit(&mut self, x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) {
-        let r = Rect::new(x, y, w as i32, h as i32).intersect(&self.clip);
-        if r.w <= 0 || r.h <= 0 {
-            return;
-        }
-        let stride = self.w as usize * 4;
-        for yy in r.y..r.bottom() {
-            let sy = (yy - y) as usize;
-            for xx in r.x..r.right() {
-                let sx = (xx - x) as usize;
-                let i = (sy * w as usize + sx) * 4;
-                let a = rgba[i + 3] as u32;
-                if a == 0 {
-                    continue;
-                }
-                let c = Color::rgb(rgba[i], rgba[i + 1], rgba[i + 2]);
-                self.blend_at(yy as usize * stride + xx as usize * 4, c, a);
-            }
-        }
-    }
-
-    /// Como `blit`, com metade da opacidade e pouca saturação (prévia de arraste).
-    pub fn blit_ghost(&mut self, x: i32, y: i32, w: u32, h: u32, rgba: &[u8]) {
-        let r = Rect::new(x, y, w as i32, h as i32).intersect(&self.clip);
-        if r.w <= 0 || r.h <= 0 {
-            return;
-        }
-        let stride = self.w as usize * 4;
-        for yy in r.y..r.bottom() {
-            let sy = (yy - y) as usize;
-            for xx in r.x..r.right() {
-                let sx = (xx - x) as usize;
-                let i = (sy * w as usize + sx) * 4;
-                let a = rgba[i + 3] as u32 / 2;
-                if a == 0 {
-                    continue;
-                }
-                let (cr, cg, cb) = (rgba[i] as u32, rgba[i + 1] as u32, rgba[i + 2] as u32);
-                let gray = (cr * 77 + cg * 150 + cb * 29) >> 8;
-                // 30 % da cor original, 70 % do cinza.
-                let mix = |c: u32| ((c * 3 + gray * 7) / 10) as u8;
-                self.blend_at(yy as usize * stride + xx as usize * 4, Color::rgb(mix(cr), mix(cg), mix(cb)), a);
-            }
-        }
+        self.blit_rgba(x, y, w, h, rgba);
     }
 
     /// Triângulo preenchido (setas de toggle).
