@@ -1,0 +1,10 @@
+[Flatpak Ref]
+Name=io.github.tevoetals.fastnotes
+Branch=stable
+Title=Fast Notes
+Url=https://tevoetals.github.io/fastnotes/repo
+Homepage=https://github.com/tevoetals/fastnotes
+SuggestRemoteName=fastnotes
+IsRuntime=false
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+GPGKey=mDMEaq15mxYJKwYBBAHaRw8BAQdAfYglqf3vwtFuXroz9JkFY/bZkDrmAO9JxMMtjRcO6u60KkZhc3QgTm90ZXMgRmxhdHBhayA8dGV2by5lLnRhbHNAZ21haWwuY29tPoiQBBMWCgA4FiEE3x2aSK4a8Qssw7j7Ul+4kuhCJYgFAmqteZsCGwMFCwkIBwIGFQoJCAsCBBYCAwECHgECF4AACgkQUl+4kuhCJYja6gEAo+JRnDCbXnDa/VBV+K5g1/evoGbbfWyUTTav9JvuhAoBAJ5EEaTiNOnL/YWwBOAtUDi5FxZiHt/iazyHGtPMv/UJ
