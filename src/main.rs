@@ -226,7 +226,7 @@ const SLASH_ITEMS: [(&str, &str, &str); 21] = [
 
 /// Ações do menu do botão direito: (rótulo, atalho, chave, palavras de
 /// busca, só com seleção).
-const CTX_ITEMS: [(&str, &str, &str, &str, bool); 30] = [
+const CTX_ITEMS: [(&str, &str, &str, &str, bool); 31] = [
     ("Copiar", "Ctrl+C", "copy", "copiar copy", true),
     ("Recortar", "Ctrl+X", "cut", "recortar cortar cut", true),
     ("Colar", "Ctrl+V", "paste", "colar paste", false),
@@ -257,6 +257,7 @@ const CTX_ITEMS: [(&str, &str, &str, &str, bool); 30] = [
     ("Divisor da tela inteira", "Ctrl+-", "hrfull", "divisor regua linha tela inteira", false),
     ("Página ao lado", "Ctrl+Alt+N", "page", "pagina nova lado", false),
     ("Desenho", "", "draw", "desenho excalidraw quadro seta caixa circulo diagrama", false),
+    ("Fundo da nota…", "Ctrl+Shift+B", "bg", "fundo cor plano background transparente nota", false),
 ];
 
 /// Menu do botão direito: busca no topo, setas/mouse para escolher.
@@ -280,22 +281,70 @@ struct Slash {
     sel: usize,
 }
 
-/// Roda de cores (Ctrl+Shift+C): matiz/saturação na roda, brilho na barra.
+/// Roda de cores: matiz/saturação na roda, brilho na barra. Serve à cor do
+/// texto (Ctrl+Shift+C) e ao fundo da nota (Ctrl+Shift+B, com opacidade).
 struct Picker {
     h: f32,
     s: f32,
     v: f32,
+    /// Opacidade (só no fundo da nota).
+    a: f32,
+    /// `true`: fundo da nota; `false`: cor da seleção.
+    bg: bool,
+    /// Hex sendo digitado (depois de `#`).
+    typed: Option<String>,
     panel: Rect,
     center: (i32, i32),
     radius: i32,
     bar: Rect,
+    alpha_bar: Rect,
 }
 
 impl Picker {
-    fn hex(&self) -> u32 {
-        let (r, g, b) = hsv_to_rgb(self.h, self.s, self.v);
-        (r as u32) << 16 | (g as u32) << 8 | b as u32
+    fn new(rgb: u32, a: f32, bg: bool) -> Picker {
+        let (h, s, v) = rgb_to_hsv(rgb);
+        Picker { h, s, v, a, bg, typed: None, panel: Rect::default(), center: (0, 0), radius: 1, bar: Rect::default(), alpha_bar: Rect::default() }
     }
+    fn hex(&self) -> u32 {
+        pk_hex(self.h, self.s, self.v)
+    }
+    /// Cor completa RRGGBBAA (para o fundo).
+    fn rgba(&self) -> u32 {
+        self.hex() << 8 | (self.a * 255.0).round().clamp(0.0, 255.0) as u32
+    }
+    /// Hex digitado, se válido: RRGGBB ou RRGGBBAA (`fff`/`ffff` curtos também).
+    fn typed_rgba(&self) -> Option<u32> {
+        let t = self.typed.as_deref()?;
+        let full: String = match t.len() {
+            3 | 4 => t.chars().flat_map(|c| [c, c]).collect(),
+            6 | 8 => t.to_string(),
+            _ => return None,
+        };
+        let v = u32::from_str_radix(&full, 16).ok()?;
+        Some(if full.len() == 6 { v << 8 | 0xff } else { v })
+    }
+    /// Põe a roda na cor RRGGBBAA.
+    fn set_rgba(&mut self, c: u32) {
+        (self.h, self.s, self.v) = rgb_to_hsv(c >> 8);
+        self.a = (c & 0xff) as f32 / 255.0;
+    }
+}
+
+fn pk_hex(h: f32, s: f32, v: f32) -> u32 {
+    let (r, g, b) = hsv_to_rgb(h, s, v);
+    (r as u32) << 16 | (g as u32) << 8 | b as u32
+}
+
+/// RRGGBBAA → cor do canvas.
+fn color_of(c: u32) -> Color {
+    rgba((c >> 24) as u8, (c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+/// Fundo claro e opaco o bastante para o texto branco sumir: tinta escura.
+fn wants_dark_ink(c: u32) -> bool {
+    let (r, g, b, a) = ((c >> 24) & 0xff, (c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+    let lum = (0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32) / 255.0;
+    a >= 0x80 && lum > 0.55
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
@@ -1018,6 +1067,8 @@ struct Tab {
     chars: usize,
     /// Auto-pomodoro: segundos de timers corridos desde a última pausa.
     timer_work: u32,
+    /// Cor de fundo desta nota (RRGGBBAA; alfa < ff = janela transparente).
+    bg: u32,
 }
 
 impl std::ops::Deref for Tab {
@@ -1306,6 +1357,7 @@ impl Tab {
             words: 0,
             chars: 0,
             timer_work: 0,
+            bg: store::DEFAULT_BG,
         }
     }
 
@@ -1390,16 +1442,20 @@ impl Tab {
             self.status = "nova nota".to_string();
             return true;
         }
-        let path = match &self.path {
-            Some(p) => p.clone(),
+        let (path, fresh) = match &self.path {
+            Some(p) => (p.clone(), false),
             None => {
                 let p = store.new_path();
                 self.path = Some(p.clone());
-                p
+                (p, true)
             }
         };
         match store.write(&path, &text) {
             Ok(()) => {
+                if fresh && self.bg != store::DEFAULT_BG {
+                    // Primeira gravação de uma nota que já ganhou fundo próprio.
+                    store.set_bg(&path, self.bg);
+                }
                 self.disk_mtime = file_mtime(&path);
                 self.saved_text = text;
                 self.status = if std::mem::take(&mut self.conflict) {
@@ -2371,6 +2427,20 @@ impl Ui {
         self.zoom as f32 * self.scale as f32
     }
 
+    /// Fundo em uso (RRGGBBAA): o da roda enquanto ela escolhe o fundo.
+    fn bg(&self) -> u32 {
+        match &self.picker {
+            Some(p) if p.bg => p.typed_rgba().unwrap_or_else(|| p.rgba()),
+            _ => self.tab().bg,
+        }
+    }
+
+    /// O quadro precisa de canal alfa (fundo não opaco, ou escolhendo o fundo:
+    /// assim arrastar a opacidade não troca de formato a cada movimento).
+    fn wants_alpha(&self) -> bool {
+        self.bg() & 0xff != 0xff || self.picker.as_ref().is_some_and(|p| p.bg)
+    }
+
     fn tab(&self) -> &Tab {
         &self.tabs[self.active]
     }
@@ -2422,10 +2492,12 @@ impl Ui {
         let text = path.as_deref().and_then(|p| self.store.read(p).ok()).unwrap_or_default();
         let mtime = path.as_deref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok());
         let fp = self.font_px();
+        let bg = path.as_deref().map_or(store::DEFAULT_BG, |p| self.store.bg_of(p));
         let Ui { font_system, images, tabs, .. } = self;
         let tab = &mut tabs[i];
         tab.load(&text, font_system, images, fp);
         tab.disk_mtime = mtime;
+        tab.bg = bg;
         tab.path = path;
         tab.status = match mtime {
             Some(t) => format!("salvo · {}", store::fmt_date(t)),
@@ -2709,7 +2781,8 @@ impl Ui {
         let h = canvas.h;
         let header_h = self.px(HEADER_H);
         let footer_h = self.px(FOOTER_H);
-        canvas.fill(BLACK);
+        let bg = color_of(self.bg());
+        canvas.fill(bg);
 
         // ---- cabeçalho: botões + abas ----
         canvas.rect(0, header_h - 1, w, 1, LINE);
@@ -2937,7 +3010,7 @@ impl Ui {
                     let y = oy + top;
                     let header = tab.lines[row.line].header;
                     // Cobre o realce de seleção da linha crua (1 px) sob a tabela.
-                    canvas.rect(ox, y, tw, rh, BLACK);
+                    canvas.clear_rect(ox, y, tw, rh, bg);
                     if ri == 0 {
                         canvas.rect(ox, y, tw, 1, RULE_SOFT);
                     }
@@ -2997,7 +3070,7 @@ impl Ui {
                 let y = oy + top;
                 canvas.set_clip(editor);
                 // Cobre o realce de seleção da linha crua invisível.
-                canvas.rect(ox, y, (text_w.max(row.w)) as i32, row.h as i32, BLACK);
+                canvas.clear_rect(ox, y, (text_w.max(row.w)) as i32, row.h as i32, bg);
                 for &(k, ix, iy) in &row.imgs {
                     let im = &tab.inline_imgs[k];
                     let Some(bm) = images.scaled(&im.path, im.w) else { continue };
@@ -3220,7 +3293,7 @@ impl Ui {
         let (w, h) = (canvas.w, canvas.h);
         let footer_h = self.px(FOOTER_H);
         let fy = h - footer_h;
-        canvas.rect(0, fy, w, footer_h, BLACK);
+        canvas.clear_rect(0, fy, w, footer_h, color_of(self.bg()));
         canvas.rect(0, fy, w, 1, LINE);
         let fcy = fy + footer_h / 2;
         let (status, timer, words, chars, page) = {
@@ -3988,16 +4061,27 @@ impl Ui {
         }
     }
 
-    /// Roda de cores: matiz no ângulo, saturação no raio, brilho na barra.
+    /// Roda de cores: matiz no ângulo, saturação no raio, brilho na barra
+    /// (e opacidade na segunda barra, quando escolhe o fundo da nota).
     fn paint_picker(&mut self, canvas: &mut Canvas, footer_y: i32) {
         let Some(pk) = self.picker.as_ref() else { return };
-        let (h, sat, v) = (pk.h, pk.s, pk.v);
+        let (h, sat, v, a, bg_mode) = (pk.h, pk.s, pk.v, pk.a, pk.bg);
+        let typed = pk.typed.clone();
+        let typed_ok = pk.typed_rgba().is_some();
         let radius = self.px(WHEEL_R);
         let pad = self.px(SP4);
         let bar_w = self.px(SP4);
-        let info_w = self.px(152.0);
-        let pw = pad * 4 + radius * 2 + bar_w + info_w;
-        let ph = pad * 2 + radius * 2;
+        let info_w = self.px(if bg_mode { 176.0 } else { 152.0 });
+        let bars = if bg_mode { 2 } else { 1 };
+        let pw = pad * (3 + bars) + radius * 2 + bar_w * bars + info_w;
+        let hints: &[&str] = if bg_mode {
+            &["Fundo da nota", "roda e barras: prévia", "clique ou Enter: aplicar", "#: digitar hex (rrggbbaa)", "T: transparente · 0: preto", "Esc: cancelar"]
+        } else {
+            &["mova o mouse: prévia", "clique ou Enter: aplicar", "#: digitar hex", "0: remover cor", "Esc: cancelar"]
+        };
+        let sw = self.px(48.0);
+        let line_h = self.px(18.0);
+        let ph = pad * 2 + (radius * 2).max(sw + self.px(SP3) + hints.len() as i32 * line_h);
         let panel = Rect::new((canvas.w - pw) / 2, footer_y - ph - self.px(SP3), pw, ph);
         for i in 1..=4 {
             let o = self.px(2.0) * i;
@@ -4005,6 +4089,9 @@ impl Ui {
         }
         canvas.rounded_outline(panel.x, panel.y, panel.w, panel.h, self.px(RADIUS_LG), BORDER, BLACK);
 
+        // Amostras de cor: pintadas com a cor exata (sem a inversão do tema
+        // sobre fundo claro, que trocaria os cinzas).
+        let ink = std::mem::replace(&mut canvas.dark_ink, false);
         let (cx, cy) = (panel.x + pad + radius, panel.y + pad + radius);
         let rf = radius as f32;
         for y in (cy - radius - 1)..=(cy + radius + 1) {
@@ -4039,22 +4126,68 @@ impl Ui {
         canvas.rect(bar.x - 2, by - 1, bar.w + 4, 3, BLACK);
         canvas.rect(bar.x - 2, by, bar.w + 4, 1, WHITE);
 
+        let hex = pk_hex(h, sat, v);
+        let (r0, g0, b0) = ((hex >> 16) as u8, (hex >> 8) as u8, hex as u8);
+        let checker = |canvas: &mut Canvas, r: Rect, cell: i32| {
+            canvas.rect(r.x, r.y, r.w, r.h, rgb(0xcc, 0xcc, 0xcc));
+            let cell = cell.max(2);
+            let mut yy = r.y;
+            while yy < r.bottom() {
+                let mut xx = r.x + if ((yy - r.y) / cell) % 2 == 0 { 0 } else { cell };
+                while xx < r.right() {
+                    canvas.rect(xx, yy, cell.min(r.right() - xx), cell.min(r.bottom() - yy), rgb(0x88, 0x88, 0x88));
+                    xx += cell * 2;
+                }
+                yy += cell;
+            }
+        };
+        // barra de opacidade (fundo): xadrez por trás mostra a transparência
+        let mut alpha_bar = Rect::default();
+        let mut ix = bar.right() + pad;
+        if bg_mode {
+            alpha_bar = Rect::new(ix, bar.y, bar_w, bar.h);
+            checker(canvas, alpha_bar, bar_w / 2);
+            for y in alpha_bar.y..alpha_bar.bottom() {
+                let aa = 1.0 - (y - alpha_bar.y) as f32 / alpha_bar.h as f32;
+                canvas.rect(alpha_bar.x, y, alpha_bar.w, 1, rgba(r0, g0, b0, (aa * 255.0) as u8));
+            }
+            let ay = alpha_bar.y + ((1.0 - a) * alpha_bar.h as f32) as i32;
+            canvas.rect(alpha_bar.x - 2, ay - 1, alpha_bar.w + 4, 3, BLACK);
+            canvas.rect(alpha_bar.x - 2, ay, alpha_bar.w + 4, 1, WHITE);
+            ix = alpha_bar.right() + pad;
+        }
+
         // amostra + hex + dicas
-        let hex = pk.hex();
-        let ix = bar.right() + pad;
-        let sw = self.px(48.0);
-        canvas.rounded_rect(ix, cy - radius, sw, sw, self.px(RADIUS), rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8));
-        let hex_text = format!("#{hex:06x}");
-        self.label(canvas, &hex_text, ix + sw + self.px(SP3), cy - radius + sw / 2, 14.0, Weight::SEMIBOLD, WHITE, 0, None);
-        let hints = ["mova o mouse: prévia", "clique ou Enter: aplicar", "0: remover cor", "Esc: cancelar"];
+        let swatch = Rect::new(ix, cy - radius, sw, sw);
+        if bg_mode {
+            checker(canvas, swatch, sw / 6);
+            canvas.rect(swatch.x, swatch.y, sw, sw, rgba(r0, g0, b0, (a * 255.0).round() as u8));
+            canvas.stroke_rect(swatch.x, swatch.y, sw, sw, 1, BORDER);
+        } else {
+            canvas.rounded_rect(swatch.x, swatch.y, sw, sw, self.px(RADIUS), rgb(r0, g0, b0));
+        }
+        canvas.dark_ink = ink;
+        let hex_text = match &typed {
+            Some(t) => format!("#{t}▏"),
+            None if bg_mode => {
+                let aa = (a * 255.0).round() as u32;
+                if aa == 255 { format!("#{hex:06x}") } else { format!("#{hex:06x}{aa:02x}") }
+            }
+            None => format!("#{hex:06x}"),
+        };
+        let hex_color = if typed.is_some() && !typed_ok { DIM } else { WHITE };
+        self.label(canvas, &hex_text, ix + sw + self.px(SP3), cy - radius + sw / 2, 14.0, Weight::SEMIBOLD, hex_color, 0, None);
+        let hy = cy - radius + sw + self.px(SP3);
         for (i, t) in hints.iter().enumerate() {
-            self.label(canvas, t, ix, cy - radius + sw + self.px(SP4) + i as i32 * self.px(18.0), UI_FONT_SM, Weight::NORMAL, DIM, 0, Some(info_w as f32));
+            let (c, wgt) = if bg_mode && i == 0 { (WHITE, Weight::SEMIBOLD) } else { (DIM, Weight::NORMAL) };
+            self.label(canvas, t, ix, hy + i as i32 * line_h, UI_FONT_SM, wgt, c, 0, Some(info_w as f32));
         }
         if let Some(pk) = self.picker.as_mut() {
             pk.panel = panel;
             pk.center = (cx, cy);
             pk.radius = radius;
             pk.bar = bar;
+            pk.alpha_bar = alpha_bar;
         }
     }
 
@@ -4162,7 +4295,7 @@ fn draw_decos(canvas: &mut Canvas, decos: Vec<Deco>, ox: i32, oy: i32, checkboxe
                     canvas.line(x0, y0, x1, y1, t, BLACK);
                     canvas.line(x1, y1, x2, y2, t, BLACK);
                 } else {
-                    canvas.rounded_outline(r.x, r.y, r.w, r.h, radius, white(0xaa), BLACK);
+                    canvas.rounded_ring(r.x, r.y, r.w, r.h, radius, 1.0, white(0xaa));
                 }
                 checkboxes.push((r, line, idx));
             }
@@ -4359,6 +4492,8 @@ struct App {
     idle_token: Option<RegistrationToken>,
     pending_token: Option<String>,
     modifiers: Modifiers,
+    /// Formato dos quadros atuais: `Some(true)` = ARGB (fundo transparente).
+    pool_alpha: Option<bool>,
     last_serial: u32,
     pointer_pos: (f64, f64),
     pointer_down: bool,
@@ -4544,6 +4679,7 @@ fn main() {
         idle_token: None,
         pending_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
         modifiers: Modifiers::default(),
+        pool_alpha: None,
         last_serial: 0,
         pointer_pos: (0.0, 0.0),
         pointer_down: false,
@@ -4799,18 +4935,27 @@ impl App {
         let height = (self.ui.height as i32 * scale).max(1);
         let stride = width * 4;
         let frame_len = (height * stride) as usize;
-        let App { pool, pool_frame, buffers, shm, ui, window, qh, needs_redraw, compositor, body_dirty, body_gen, slot_gen, .. } = self;
+        let App { pool, pool_frame, pool_alpha, buffers, shm, ui, window, qh, needs_redraw, compositor, body_dirty, body_gen, slot_gen, .. } = self;
 
         // O pool do wl_shm só cresce (a biblioteca dobra o tamanho a cada
         // alocação que não cabe). Para a memória ficar em exatamente dois
         // quadros, o pool é recriado quando o tamanho da janela muda.
-        if *pool_frame != frame_len {
-            *buffers = [None, None, None];
-            *slot_gen = [u64::MAX; 3];
+        let alpha = ui.wants_alpha();
+        let resized = *pool_frame != frame_len;
+        if resized {
             *pool = SlotPool::new(frame_len * 2, shm).expect("shm pool");
             *pool_frame = frame_len;
-            // Janela opaca: o compositor não precisa misturar (blend) nada.
-            if let Ok(region) = Region::new(compositor) {
+        }
+        if resized || *pool_alpha != Some(alpha) {
+            // Formato novo (XRGB ⇄ ARGB) ou tamanho novo: quadros refeitos.
+            *buffers = [None, None, None];
+            *slot_gen = [u64::MAX; 3];
+            *pool_alpha = Some(alpha);
+            if alpha {
+                // Fundo transparente: o compositor mistura com o que está atrás.
+                window.wl_surface().set_opaque_region(None);
+            } else if let Ok(region) = Region::new(compositor) {
+                // Janela opaca: o compositor não precisa misturar (blend) nada.
                 region.add(0, 0, ui.width as i32, ui.height as i32);
                 window.wl_surface().set_opaque_region(Some(region.wl_region()));
             }
@@ -4848,10 +4993,13 @@ impl App {
             slot_gen[i] = u64::MAX;
         }
         let buf = buffers[i].get_or_insert_with(|| {
-            pool.create_buffer(width, height, stride, wl_shm::Format::Xrgb8888).expect("create buffer").0
+            let fmt = if alpha { wl_shm::Format::Argb8888 } else { wl_shm::Format::Xrgb8888 };
+            pool.create_buffer(width, height, stride, fmt).expect("create buffer").0
         });
         let canvas_bytes = pool.canvas(buf).expect("quadro livre");
         let mut canvas = Canvas::new(canvas_bytes, width, height);
+        canvas.xrgb = !alpha;
+        canvas.dark_ink = wants_dark_ink(ui.bg());
         let t0 = Instant::now();
         if std::mem::take(body_dirty) {
             *body_gen += 1;
@@ -6223,10 +6371,12 @@ impl App {
             return;
         }
         self.flush();
+        let bg = self.ui.tab().bg;
         let i = self.ui.new_tab();
         self.ui.active = i;
         let fp = self.ui.font_px();
         let Ui { font_system, images, tabs, .. } = &mut self.ui;
+        tabs[i].bg = bg;
         tabs[i].load(&text, font_system, images, fp);
         tabs[i].saved_text.clear();
         tabs[i].status = "cópia (não salva)".to_string();
@@ -6746,8 +6896,92 @@ impl App {
                 }
             }
         }
-        self.ui.picker = Some(Picker { h, s: sv, v: vv, panel: Rect::default(), center: (0, 0), radius: 1, bar: Rect::default() });
+        let mut pk = Picker::new(0, 1.0, false);
+        (pk.h, pk.s, pk.v) = (h, sv, vv);
+        self.ui.picker = Some(pk);
         self.update_preview();
+    }
+
+    /// Roda de cores para o fundo da nota (prévia ao vivo na janela toda).
+    fn open_bg_picker(&mut self) {
+        let c = self.ui.tab().bg;
+        self.ui.picker = Some(Picker::new(c >> 8, (c & 0xff) as f32 / 255.0, true));
+        self.request_redraw();
+    }
+
+    /// Define o fundo da nota atual e grava (notas sem arquivo gravam na
+    /// primeira vez que forem salvas).
+    fn set_note_bg(&mut self, c: u32) {
+        self.ui.picker = None;
+        let tab = self.ui.tab_mut();
+        tab.bg = c;
+        let path = tab.path.clone();
+        tab.status = match c & 0xff {
+            _ if c == store::DEFAULT_BG => "fundo padrão".to_string(),
+            0 => "fundo transparente".to_string(),
+            0xff => format!("fundo #{:06x}", c >> 8),
+            _ => format!("fundo #{c:08x}"),
+        };
+        if let Some(p) = path {
+            self.ui.store.set_bg(&p, c);
+        }
+        self.request_redraw();
+    }
+
+    /// Tecla na roda de cores. `#` abre o campo hex; com ele aberto, dígitos
+    /// hex entram nele (a cor vai para a roda assim que fica válida).
+    fn picker_key(&mut self, sym: Keysym, ch: Option<char>, digit: Option<u8>, m: &Modifiers) {
+        let Some(pk) = self.ui.picker.as_mut() else { return };
+        let bg = pk.bg;
+        if let Some(t) = pk.typed.as_mut() {
+            match (sym, ch) {
+                (Keysym::BackSpace, _) => {
+                    if t.pop().is_none() {
+                        pk.typed = None;
+                    }
+                }
+                (_, Some(c)) if c.is_ascii_hexdigit() && t.len() < 8 => t.push(c.to_ascii_lowercase()),
+                (_, Some('#')) => t.clear(),
+                _ => return self.picker_key_base(sym, ch, digit, m, bg),
+            }
+            if let Some(v) = pk.typed_rgba() {
+                pk.set_rgba(if bg { v } else { v | 0xff });
+            }
+            if bg {
+                self.request_redraw();
+            } else {
+                self.update_preview();
+                self.request_redraw();
+            }
+            return;
+        }
+        self.picker_key_base(sym, ch, digit, m, bg);
+    }
+
+    fn picker_key_base(&mut self, sym: Keysym, ch: Option<char>, digit: Option<u8>, m: &Modifiers, bg: bool) {
+        match (sym, digit, ch) {
+            (Keysym::Escape, ..) => self.close_picker(),
+            (Keysym::Return | Keysym::KP_Enter, ..) => self.apply_picker(),
+            (_, Some(0), _) if bg => self.set_note_bg(store::DEFAULT_BG),
+            (_, Some(0), _) => self.remove_color(),
+            (_, _, Some('#')) => {
+                if let Some(pk) = self.ui.picker.as_mut() {
+                    pk.typed = Some(String::new());
+                }
+                self.request_redraw();
+            }
+            (_, _, Some('t' | 'T')) if bg && !m.ctrl => {
+                if let Some(pk) = self.ui.picker.as_mut() {
+                    pk.a = 0.0;
+                }
+                self.request_redraw();
+            }
+            _ => {
+                if m.ctrl && m.shift && matches!(ch, Some('c' | 'b')) {
+                    self.close_picker();
+                }
+            }
+        }
     }
 
     fn close_picker(&mut self) {
@@ -6770,6 +7004,11 @@ impl App {
 
     /// Mostra a cor atual da roda na seleção, sem alterar o texto.
     fn update_preview(&mut self) {
+        if self.ui.picker.as_ref().is_some_and(|p| p.bg) {
+            // Fundo: a prévia é a janela inteira, pintada direto da roda.
+            self.request_redraw();
+            return;
+        }
         let Some(hex) = self.ui.picker.as_ref().map(Picker::hex) else { return };
         let tab = self.ui.tab_mut();
         let cur = tab.editor.cursor();
@@ -6786,6 +7025,10 @@ impl App {
 
     /// Aplica a cor da roda à seleção: substitui o `{#hex ` existente ou envolve.
     fn apply_picker(&mut self) {
+        if let Some(c) = self.ui.picker.as_ref().filter(|p| p.bg).map(|p| p.typed_rgba().unwrap_or_else(|| p.rgba())) {
+            self.set_note_bg(c);
+            return;
+        }
         let Some(hex) = self.ui.picker.as_ref().map(Picker::hex) else { return };
         self.ui.picker = None;
         self.ui.tab_mut().preview = None;
@@ -7056,6 +7299,7 @@ impl App {
             "code" => self.wrap_selection("`", "`"),
             "link" => self.wrap_selection("[", "](https://)"),
             "color" => self.open_picker(),
+            "bg" => self.open_bg_picker(),
             "nocolor" => self.remove_color(),
             "upper" => self.transform_selection(|t| t.to_uppercase()),
             "lower" => self.transform_selection(|t| t.to_lowercase()),
@@ -7760,16 +8004,7 @@ impl App {
         }
 
         if self.ui.picker.is_some() {
-            match (sym, digit) {
-                (Keysym::Escape, _) => self.close_picker(),
-                (Keysym::Return, _) | (Keysym::KP_Enter, _) => self.apply_picker(),
-                (_, Some(0)) => self.remove_color(),
-                _ => {
-                    if m.ctrl && m.shift && ch == Some('c') {
-                        self.close_picker();
-                    }
-                }
-            }
+            self.picker_key(sym, ch, digit, &m);
             return;
         }
 
@@ -7800,6 +8035,10 @@ impl App {
                 (_, Some('s')) => { self.wrap_selection("~~", "~~"); true }
                 (_, Some('c')) => {
                     self.open_picker();
+                    true
+                }
+                (_, Some('b')) => {
+                    self.open_bg_picker();
                     true
                 }
                 (_, Some('k')) => { self.delete_line(); true }
@@ -8051,12 +8290,21 @@ impl App {
         if d <= pk.radius as f32 + 2.0 {
             pk.h = dy.atan2(dx).to_degrees().rem_euclid(360.0);
             pk.s = (d / pk.radius as f32).min(1.0);
+            pk.typed = None;
             self.update_preview();
             return true;
         }
         let bar = pk.bar;
         if Rect::new(bar.x - 4, bar.y, bar.w + 8, bar.h).contains(px, py) {
             pk.v = (1.0 - (py - bar.y) as f32 / bar.h as f32).clamp(0.0, 1.0);
+            pk.typed = None;
+            self.update_preview();
+            return true;
+        }
+        let ab = pk.alpha_bar;
+        if ab.w > 0 && Rect::new(ab.x - 4, ab.y - 4, ab.w + 8, ab.h + 8).contains(px, py) {
+            pk.a = (1.0 - (py - ab.y) as f32 / ab.h as f32).clamp(0.0, 1.0);
+            pk.typed = None;
             self.update_preview();
             return true;
         }

@@ -1,5 +1,6 @@
 //! Armazenamento: um arquivo `.md` UTF-8 puro por nota, mais um arquivo
-//! `state` minúsculo (última nota, tamanho da janela, zoom).
+//! `state` minúsculo (última nota, tamanho da janela, zoom) e um `fundos`
+//! com a cor de fundo das notas que não usam o preto padrão.
 
 use std::fs;
 use std::io::{self, Read};
@@ -33,7 +34,11 @@ pub struct Store {
     pub trash_dir: PathBuf,
     pub images_dir: PathBuf,
     state_path: PathBuf,
+    bg_path: PathBuf,
 }
+
+/// Fundo padrão das notas (RRGGBBAA): preto opaco.
+pub const DEFAULT_BG: u32 = 0x0000_00ff;
 
 impl Store {
     pub fn open() -> io::Result<Store> {
@@ -52,7 +57,7 @@ impl Store {
         fs::create_dir_all(&notes_dir)?;
         fs::create_dir_all(&trash_dir)?;
         let images_dir = base.join("images");
-        Ok(Store { state_path: base.join("state"), base_dir: base, notes_dir, trash_dir, images_dir })
+        Ok(Store { state_path: base.join("state"), bg_path: base.join("fundos"), base_dir: base, notes_dir, trash_dir, images_dir })
     }
 
     /// Todas as notas, mais recente primeiro.
@@ -113,6 +118,37 @@ impl Store {
             n += 1;
         }
         path
+    }
+
+    /// Linhas `nome-do-arquivo.md rrggbbaa` (só notas com fundo próprio).
+    fn bg_entries(&self) -> Vec<(String, u32)> {
+        let Ok(s) = fs::read_to_string(&self.bg_path) else { return Vec::new() };
+        s.lines()
+            .filter_map(|l| {
+                let (name, hex) = l.rsplit_once(' ')?;
+                Some((name.to_string(), u32::from_str_radix(hex.trim(), 16).ok()?))
+            })
+            .collect()
+    }
+
+    /// Cor de fundo da nota em `path` (RRGGBBAA).
+    pub fn bg_of(&self, path: &Path) -> u32 {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return DEFAULT_BG };
+        self.bg_entries().into_iter().find(|(n, _)| n == name).map_or(DEFAULT_BG, |(_, c)| c)
+    }
+
+    /// Guarda a cor de fundo da nota (o padrão some do arquivo).
+    pub fn set_bg(&self, path: &Path, color: u32) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { return };
+        let mut entries: Vec<(String, u32)> = self.bg_entries().into_iter().filter(|(n, _)| n != name).collect();
+        if color != DEFAULT_BG {
+            entries.push((name.to_string(), color));
+        }
+        let body: String = entries.iter().map(|(n, c)| format!("{n} {c:08x}\n")).collect();
+        let tmp = self.bg_path.with_extension("tmp");
+        if fs::write(&tmp, body).is_ok() {
+            let _ = fs::rename(&tmp, &self.bg_path);
+        }
     }
 
     pub fn load_state(&self) -> State {

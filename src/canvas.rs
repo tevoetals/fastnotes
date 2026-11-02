@@ -1,4 +1,5 @@
-//! Desenho por software num buffer ARGB8888 (little-endian: B, G, R, A).
+//! Desenho por software num buffer ARGB8888 (little-endian: B, G, R, A),
+//! com alfa pré-multiplicado (o fundo da nota pode ser transparente).
 
 pub use cosmic_text::Color;
 
@@ -44,11 +45,16 @@ pub struct Canvas<'a> {
     pub w: i32,
     pub h: i32,
     clip: Rect,
+    /// Fundo claro: tons neutros (branco, preto, cinzas) saem invertidos, e o
+    /// tema preto e branco vira tinta escura sobre o fundo.
+    pub dark_ink: bool,
+    /// Buffer XRGB (alfa ignorado pelo compositor): preto vira memset.
+    pub xrgb: bool,
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u8], w: i32, h: i32) -> Canvas<'a> {
-        Canvas { buf, w, h, clip: Rect::new(0, 0, w, h) }
+        Canvas { buf, w, h, clip: Rect::new(0, 0, w, h), dark_ink: false, xrgb: true }
     }
 
     pub fn set_clip(&mut self, r: Rect) {
@@ -61,15 +67,49 @@ impl<'a> Canvas<'a> {
         self.clip = Rect::new(0, 0, self.w, self.h);
     }
 
+    /// Cor do tema ajustada ao fundo (ver `dark_ink`).
+    #[inline]
+    pub fn ink(&self, c: Color) -> Color {
+        if self.dark_ink && c.r() == c.g() && c.g() == c.b() {
+            let v = 255 - c.r();
+            rgba(v, v, v, c.a())
+        } else {
+            c
+        }
+    }
+
+    /// Pixel pré-multiplicado (B, G, R, A) da cor exata, sem mistura.
+    fn premul(c: Color) -> [u8; 4] {
+        let a = c.a() as u32;
+        let m = |v: u8| ((v as u32 * a + 127) / 255) as u8;
+        [m(c.b()), m(c.g()), m(c.r()), c.a()]
+    }
+
+    /// Pinta o quadro inteiro com o fundo (cor exata, inclusive transparente).
     pub fn fill(&mut self, c: Color) {
-        // O buffer é XRGB (alfa ignorado): fundo preto vira um memset.
-        if c.r() == 0 && c.g() == 0 && c.b() == 0 {
+        let px = Self::premul(c);
+        if px == [0, 0, 0, 0] || (px[..3] == [0, 0, 0] && self.xrgb) {
             self.buf.fill(0);
             return;
         }
-        let px = [c.b(), c.g(), c.r(), 255];
         for chunk in self.buf.chunks_exact_mut(4) {
             chunk.copy_from_slice(&px);
+        }
+    }
+
+    /// Retângulo com a cor exata do fundo, sem mistura (cobre o que estava embaixo).
+    pub fn clear_rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: Color) {
+        let r = Rect::new(x, y, w, h).intersect(&self.clip);
+        if r.w <= 0 || r.h <= 0 {
+            return;
+        }
+        let px = Self::premul(c);
+        let stride = self.w as usize * 4;
+        for yy in r.y..r.bottom() {
+            let start = yy as usize * stride + r.x as usize * 4;
+            for chunk in self.buf[start..start + r.w as usize * 4].chunks_exact_mut(4) {
+                chunk.copy_from_slice(&px);
+            }
         }
     }
 
@@ -90,11 +130,16 @@ impl<'a> Canvas<'a> {
         d[0] = ((c.b() as u32 * alpha + d[0] as u32 * inv) / 255) as u8;
         d[1] = ((c.g() as u32 * alpha + d[1] as u32 * inv) / 255) as u8;
         d[2] = ((c.r() as u32 * alpha + d[2] as u32 * inv) / 255) as u8;
-        d[3] = 255;
+        d[3] = (alpha + d[3] as u32 * inv / 255) as u8;
     }
 
     /// Retângulo com mistura de alpha, recortado pelo clip.
     pub fn rect(&mut self, x: i32, y: i32, w: i32, h: i32, c: Color) {
+        let c = self.ink(c);
+        self.rect_raw(x, y, w, h, c);
+    }
+
+    fn rect_raw(&mut self, x: i32, y: i32, w: i32, h: i32, c: Color) {
         let r = Rect::new(x, y, w, h).intersect(&self.clip);
         if r.w <= 0 || r.h <= 0 {
             return;
@@ -128,6 +173,7 @@ impl<'a> Canvas<'a> {
         if r.w <= 0 || r.h <= 0 || mask.len() < (w * h) as usize {
             return;
         }
+        let c = self.ink(c);
         let ca = c.a() as u32;
         if ca == 0 {
             return;
@@ -154,7 +200,7 @@ impl<'a> Canvas<'a> {
                     d[0] = ((cb * a + d[0] as u32 * inv) / 255) as u8;
                     d[1] = ((cg * a + d[1] as u32 * inv) / 255) as u8;
                     d[2] = ((cr * a + d[2] as u32 * inv) / 255) as u8;
-                    d[3] = 255;
+                    d[3] = (a + d[3] as u32 * inv / 255) as u8;
                 }
             }
         }
@@ -187,7 +233,7 @@ impl<'a> Canvas<'a> {
                     d[0] = ((s[2] as u32 * a + d[0] as u32 * inv) / 255) as u8;
                     d[1] = ((s[1] as u32 * a + d[1] as u32 * inv) / 255) as u8;
                     d[2] = ((s[0] as u32 * a + d[2] as u32 * inv) / 255) as u8;
-                    d[3] = 255;
+                    d[3] = (a + d[3] as u32 * inv / 255) as u8;
                 }
             }
         }
@@ -195,15 +241,16 @@ impl<'a> Canvas<'a> {
 
     /// Retângulo com cantos arredondados e antialiasing nos cantos.
     pub fn rounded_rect(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, c: Color) {
+        let c = self.ink(c);
         let r = radius.clamp(0, (w.min(h) / 2).max(0));
         if r == 0 {
-            self.rect(x, y, w, h, c);
+            self.rect_raw(x, y, w, h, c);
             return;
         }
         // Miolo: linhas inteiras sem cantos.
-        self.rect(x + r, y, w - 2 * r, h, c);
-        self.rect(x, y + r, r, h - 2 * r, c);
-        self.rect(x + w - r, y + r, r, h - 2 * r, c);
+        self.rect_raw(x + r, y, w - 2 * r, h, c);
+        self.rect_raw(x, y + r, r, h - 2 * r, c);
+        self.rect_raw(x + w - r, y + r, r, h - 2 * r, c);
         let alpha = c.a() as f32;
         let stride = self.w as usize * 4;
         let centers = [
@@ -242,6 +289,32 @@ impl<'a> Canvas<'a> {
         self.rect(x, y + h - t, w, t, c);
         self.rect(x, y + t, t, h - 2 * t, c);
         self.rect(x + w - t, y + t, t, h - 2 * t, c);
+    }
+
+    /// Anel arredondado de espessura `t` com antialiasing: o miolo fica
+    /// intocado (vale sobre fundo transparente, ao contrário de `rounded_outline`).
+    pub fn rounded_ring(&mut self, x: i32, y: i32, w: i32, h: i32, radius: i32, t: f32, c: Color) {
+        let c = self.ink(c);
+        let r = Rect::new(x, y, w, h).intersect(&self.clip);
+        if r.w <= 0 || r.h <= 0 || c.a() == 0 {
+            return;
+        }
+        let rad = radius.clamp(0, w.min(h) / 2) as f32;
+        let (hx, hy) = (w as f32 / 2.0, h as f32 / 2.0);
+        let (cx, cy) = (x as f32 + hx, y as f32 + hy);
+        let stride = self.w as usize * 4;
+        for yy in r.y..r.bottom() {
+            for xx in r.x..r.right() {
+                // Distância com sinal até a borda do retângulo arredondado.
+                let qx = (xx as f32 + 0.5 - cx).abs() - (hx - rad);
+                let qy = (yy as f32 + 0.5 - cy).abs() - (hy - rad);
+                let d = (qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0)) - rad;
+                let cov = (0.5 - d).clamp(0.0, 1.0) - (0.5 - d - t).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    self.blend_at(yy as usize * stride + xx as usize * 4, c, (c.a() as f32 * cov) as u32);
+                }
+            }
+        }
     }
 
     /// Contorno arredondado de 1px (desenha o cheio e recorta o interior).
@@ -287,5 +360,38 @@ impl<'a> Canvas<'a> {
             let y = y0 as f32 + (y1 - y0) as f32 * t;
             self.rect(x.round() as i32 - thick / 2, y.round() as i32 - thick / 2, thick, thick, c);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparent_background_keeps_premultiplied_alpha() {
+        let mut buf = vec![0u8; 4 * 4 * 4];
+        let mut c = Canvas::new(&mut buf, 4, 4);
+        c.xrgb = false;
+        c.fill(rgba(0xff, 0xf8, 0xdc, 0));
+        // Branco com 50% sobre o vazio: cor e alfa pré-multiplicados juntos.
+        c.rect(0, 0, 1, 1, rgba(0xff, 0xff, 0xff, 128));
+        // Opaco cobre tudo.
+        c.rect(1, 0, 1, 1, rgb(0x10, 0x20, 0x30));
+        // Fundo meio transparente pintado pela cor exata.
+        c.clear_rect(2, 0, 1, 1, rgba(0xff, 0, 0, 0x80));
+        assert_eq!(&buf[0..4], &[128, 128, 128, 128]);
+        assert_eq!(&buf[4..8], &[0x30, 0x20, 0x10, 255]);
+        assert_eq!(&buf[8..12], &[0, 0, 128, 0x80]);
+        assert_eq!(&buf[12..16], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn dark_ink_inverts_only_neutral_colors() {
+        let mut buf = vec![0u8; 4];
+        let mut c = Canvas::new(&mut buf, 1, 1);
+        c.dark_ink = true;
+        assert_eq!(c.ink(rgb(0xff, 0xff, 0xff)), rgb(0, 0, 0));
+        assert_eq!(c.ink(rgba(0xff, 0xff, 0xff, 0x1f)), rgba(0, 0, 0, 0x1f));
+        assert_eq!(c.ink(rgb(0xff, 0x6b, 0x6b)), rgb(0xff, 0x6b, 0x6b));
     }
 }

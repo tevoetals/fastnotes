@@ -15,6 +15,8 @@ vivo como no Notion.
 - **Cor em qualquer trecho** com roda de cores (`Ctrl+Shift+C`): `{#ff8800 texto}`,
   até dentro de uma palavra. Sem bloquinhos: qualquer intervalo de caracteres.
 - **Tema**: fundo `#000000`, texto `#ffffff` (tons são branco com transparência).
+- **Fundo por nota** (`Ctrl+Shift+B`): qualquer cor hex, inclusive translúcida ou
+  totalmente transparente (para gravar vídeo ou anotar por cima de imagens).
 - **Abas** na barra superior; reabertas na próxima sessão.
 - **Acentos e dead keys** via compose do xkbcommon (´ + a = á, ~ + o = õ, AltGr etc.).
 - **Auto-save** 1,5 s depois da última tecla, ao perder o foco, ao trocar/fechar aba
@@ -82,7 +84,8 @@ de novo sobre um trecho já formatado remove a formatação.
 | `Ctrl+Shift+S` | ~~riscado~~ | `~~texto~~` |
 | `Ctrl+E` | `código` | `` `texto` `` |
 | `Ctrl+K` | link | `[texto](https://)` (edite a URL) |
-| `Ctrl+Shift+C` | cor: abre a roda de cores (mouse), clique aplica, **0** remove | `{#ff8800 texto}` |
+| `Ctrl+Shift+C` | cor: abre a roda de cores (mouse), clique aplica, **0** remove, `#` digita o hex | `{#ff8800 texto}` |
+| `Ctrl+Shift+B` | fundo da nota: cor, opacidade, `T` transparente, **0** preto | (fora do `.md`) |
 
 Os marcadores ficam visíveis só na linha onde está o cursor; nas outras
 somem e o texto aparece formatado. Para ver o Markdown de uma linha, basta
@@ -257,12 +260,39 @@ Selecione o trecho e aperte `Ctrl+Shift+C`: abre uma **roda de cores**. Passe
 o mouse pela roda (matiz e saturação) e pela barra ao lado (brilho): a seleção
 já mostra a cor como prévia. Clique (ou Enter) para aplicar, `0` remove a cor
 da seleção, `Esc` cancela. Sem seleção, a cor vale para o que você digitar em
-seguida.
+seguida. Para uma cor exata, aperte `#` e digite o hex (`#4dabf7`).
 
 No arquivo fica `{#rrggbb texto}`; os marcadores nunca aparecem na tela, só o
 texto colorido. Pode envolver parte de uma palavra (`pal{#6ea8ff avr}a`) e
 conter outros estilos (`{#55e07a **forte**}`). Nomes também são aceitos ao
 digitar (`{vermelho texto}`, `{green text}`).
+
+### Fundo da nota
+
+Cada nota pode ter a sua cor de fundo; o padrão é preto. Aperte
+`Ctrl+Shift+B` (ou "Fundo da nota…" no menu do botão direito): abre a roda de
+cores com uma barra a mais, de **opacidade**. A janela inteira já mostra a
+prévia enquanto você mexe.
+
+| Na roda do fundo | Faz |
+|---|---|
+| roda / barra de brilho / barra de opacidade | escolhe a cor (prévia ao vivo) |
+| `#` e o hex | cor exata: `#1e3a5f`, `#fff8dc`, `#00000080` (meio transparente), `#fff` |
+| `T` | opacidade zero: **fundo totalmente transparente** |
+| `0` | volta ao preto padrão |
+| clique ou `Enter` / `Esc` | aplica / cancela |
+
+- **Transparente**: só o texto, as linhas e os ícones aparecem; o que está
+  atrás da janela (vídeo, imagem, outra janela) fica visível. Útil para gravar
+  tela e anotar em cima. O compositor (KWin, GNOME, Sway…) precisa estar com
+  composição ligada, que é o normal no Wayland.
+- **Fundo claro**: o texto e a interface viram tinta escura sozinhos (os cinzas
+  do tema se invertem, inclusive traços brancos dos desenhos); cores escolhidas
+  com `{#hex …}` ficam como estão.
+- A cor fica em `~/.local/share/fastnotes/fundos` (`nota.md rrggbbaa`), fora do
+  `.md`: o arquivo da nota continua Markdown puro.
+- Quando nenhuma nota tem fundo transparente, a janela continua opaca (o
+  compositor não precisa misturar nada, como antes).
 
 ### Emoji e símbolos
 
@@ -535,6 +565,7 @@ por texto e por arquivo, lixeira) e a recarga ao vivo no app foram testados.
 
 `~/.local/share/fastnotes/notes/*.md`. Nota apagada ou esvaziada vai para
 `~/.local/share/fastnotes/trash/`. Mude o diretório com `FASTNOTES_DIR=/caminho`.
+Cores de fundo por nota ficam em `~/.local/share/fastnotes/fundos`.
 Os arquivos são Markdown comum: abrem em qualquer editor, Obsidian, Notion etc.
 
 ## Como funciona (referências)
