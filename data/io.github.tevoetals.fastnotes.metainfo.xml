@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.5.3" date="2026-11-02">
+      <description>
+        <p>Memória: o app parado usa cerca de um terço do que usava (imagens sem o original decodificado, limpeza ao trocar de aba, ao fechar o seletor de emoji e depois de alguns segundos parado).</p>
+      </description>
+    </release>
     <release version="0.5.2" date="2026-11-02">
       <description>
         <p>Desempenho: timer rodando gasta 4 vezes menos CPU (só o rodapé é redesenhado), digitar em notas com várias páginas ficou ~40% mais leve, e a divisória da tela inteira não some mais atrás de tabelas e imagens da página vizinha.</p>
