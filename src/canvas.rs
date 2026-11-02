@@ -48,13 +48,11 @@ pub struct Canvas<'a> {
     /// Fundo claro: tons neutros (branco, preto, cinzas) saem invertidos, e o
     /// tema preto e branco vira tinta escura sobre o fundo.
     pub dark_ink: bool,
-    /// Buffer XRGB (alfa ignorado pelo compositor): preto vira memset.
-    pub xrgb: bool,
 }
 
 impl<'a> Canvas<'a> {
     pub fn new(buf: &'a mut [u8], w: i32, h: i32) -> Canvas<'a> {
-        Canvas { buf, w, h, clip: Rect::new(0, 0, w, h), dark_ink: false, xrgb: true }
+        Canvas { buf, w, h, clip: Rect::new(0, 0, w, h), dark_ink: false }
     }
 
     pub fn set_clip(&mut self, r: Rect) {
@@ -88,8 +86,15 @@ impl<'a> Canvas<'a> {
     /// Pinta o quadro inteiro com o fundo (cor exata, inclusive transparente).
     pub fn fill(&mut self, c: Color) {
         let px = Self::premul(c);
-        if px == [0, 0, 0, 0] || (px[..3] == [0, 0, 0] && self.xrgb) {
+        if px == [0, 0, 0, 0] {
             self.buf.fill(0);
+            return;
+        }
+        // Palavras de 32 bits: o compilador vetoriza como um memset.
+        // SAFETY: u32 não tem padrões de bits inválidos.
+        let (head, mid, tail) = unsafe { self.buf.align_to_mut::<u32>() };
+        if head.is_empty() && tail.is_empty() {
+            mid.fill(u32::from_ne_bytes(px));
             return;
         }
         for chunk in self.buf.chunks_exact_mut(4) {
@@ -371,7 +376,6 @@ mod tests {
     fn transparent_background_keeps_premultiplied_alpha() {
         let mut buf = vec![0u8; 4 * 4 * 4];
         let mut c = Canvas::new(&mut buf, 4, 4);
-        c.xrgb = false;
         c.fill(rgba(0xff, 0xf8, 0xdc, 0));
         // Branco com 50% sobre o vazio: cor e alfa pré-multiplicados juntos.
         c.rect(0, 0, 1, 1, rgba(0xff, 0xff, 0xff, 128));
@@ -383,6 +387,13 @@ mod tests {
         assert_eq!(&buf[4..8], &[0x30, 0x20, 0x10, 255]);
         assert_eq!(&buf[8..12], &[0, 0, 128, 0x80]);
         assert_eq!(&buf[12..16], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn opaque_black_fill_sets_alpha() {
+        let mut buf = vec![7u8; 4 * 3];
+        Canvas::new(&mut buf, 3, 1).fill(rgb(0, 0, 0));
+        assert_eq!(buf, [0, 0, 0, 255].repeat(3));
     }
 
     #[test]

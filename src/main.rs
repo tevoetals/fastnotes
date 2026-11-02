@@ -2435,8 +2435,8 @@ impl Ui {
         }
     }
 
-    /// O quadro precisa de canal alfa (fundo não opaco, ou escolhendo o fundo:
-    /// assim arrastar a opacidade não troca de formato a cada movimento).
+    /// O quadro tem transparência (fundo não opaco, ou escolhendo o fundo:
+    /// assim arrastar a opacidade não troca a região opaca a cada movimento).
     fn wants_alpha(&self) -> bool {
         self.bg() & 0xff != 0xff || self.picker.as_ref().is_some_and(|p| p.bg)
     }
@@ -4492,7 +4492,7 @@ struct App {
     idle_token: Option<RegistrationToken>,
     pending_token: Option<String>,
     modifiers: Modifiers,
-    /// Formato dos quadros atuais: `Some(true)` = ARGB (fundo transparente).
+    /// Região opaca enviada: `Some(true)` = nenhuma (fundo transparente).
     pool_alpha: Option<bool>,
     last_serial: u32,
     pointer_pos: (f64, f64),
@@ -4946,10 +4946,15 @@ impl App {
             *pool = SlotPool::new(frame_len * 2, shm).expect("shm pool");
             *pool_frame = frame_len;
         }
-        if resized || *pool_alpha != Some(alpha) {
-            // Formato novo (XRGB ⇄ ARGB) ou tamanho novo: quadros refeitos.
+        if resized {
             *buffers = [None, None, None];
             *slot_gen = [u64::MAX; 3];
+        }
+        // Os quadros são sempre ARGB: o KWin só decide se a janela tem canal
+        // alfa quando ela aparece, então uma nota que fica transparente depois
+        // continuaria preta com XRGB. Quem diz que é opaca é a região opaca
+        // (o compositor não mistura nada nela, como com XRGB).
+        if resized || *pool_alpha != Some(alpha) {
             *pool_alpha = Some(alpha);
             if alpha {
                 // Fundo transparente: o compositor mistura com o que está atrás.
@@ -4993,12 +4998,10 @@ impl App {
             slot_gen[i] = u64::MAX;
         }
         let buf = buffers[i].get_or_insert_with(|| {
-            let fmt = if alpha { wl_shm::Format::Argb8888 } else { wl_shm::Format::Xrgb8888 };
-            pool.create_buffer(width, height, stride, fmt).expect("create buffer").0
+            pool.create_buffer(width, height, stride, wl_shm::Format::Argb8888).expect("create buffer").0
         });
         let canvas_bytes = pool.canvas(buf).expect("quadro livre");
         let mut canvas = Canvas::new(canvas_bytes, width, height);
-        canvas.xrgb = !alpha;
         canvas.dark_ink = wants_dark_ink(ui.bg());
         let t0 = Instant::now();
         if std::mem::take(body_dirty) {
