@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.7.0" date="2026-11-02">
+      <description>
+        <p>Fundo por nota: qualquer cor hex, translúcido ou totalmente transparente (Ctrl+Shift+B), com tinta escura automática em fundos claros.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-11-02">
       <description>
         <p>Desenho no estilo Excalidraw dentro da nota: retângulo, losango, elipse, triângulo, setas que grudam nas formas, linha, lápis, texto, borracha, cores, preenchimentos, traçados, rótulos e camadas.</p>
