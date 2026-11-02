@@ -45,6 +45,11 @@
     <keyword xml:lang="pt-BR">anotações</keyword>
   </keywords>
   <releases>
+    <release version="0.5.2" date="2026-11-02">
+      <description>
+        <p>Desempenho: timer rodando gasta 4 vezes menos CPU (só o rodapé é redesenhado), digitar em notas com várias páginas ficou ~40% mais leve, e a divisória da tela inteira não some mais atrás de tabelas e imagens da página vizinha.</p>
+      </description>
+    </release>
     <release version="0.5.1" date="2026-10-07">
       <description>
         <p>Desempenho: escolher cor passando o mouse pela roda não trava mais; digitar em notas com tabelas, colunas e imagens ficou cerca de 3 vezes mais leve.</p>
